@@ -1,0 +1,84 @@
+# Built-in presets for game-clipper.
+#
+# Resolution order (later wins):
+#   [defaults] here -> [defaults] in --config -> [presets.<name>] here
+#   -> [presets.<name>] in --config -> CLI flags
+#
+# Score units: "sustained" is dB above the rolling baseline / 10 and "transient" is
+# the dB jump over the previous few seconds / 10, so a window score of 0.6 means
+# roughly "6 dB louder than usual" once the weights are applied.
+
+[defaults]
+description = "Balanced settings for most games."
+
+# Feature extraction
+sample_rate = 16000          # Hz; game audio cues live well below 8 kHz
+window = 0.5                 # seconds per analysis window
+
+# Baseline (adapts to each recording's overall volume)
+baseline_seconds = 90.0
+baseline_percentile = 40.0
+
+# Scores
+w_sustained = 0.6
+w_transient = 0.4
+transient_lookback = 3.0     # seconds compared against for sudden jumps
+threshold = 0.6              # window score needed to start an event
+
+# Music / radio suppression
+music_floor_db = 6.0         # dB above the quiet floor that counts as "loud"
+music_min_len = 20.0         # loud stretches longer than this may be music
+music_max_std_db = 4.0       # ...if their loudness varies less than this
+music_penalty = 0.3          # 0 = off, 1 = fully suppress steady music
+tonal_penalty = 0.0          # extra penalty for tonal (low spectral flatness) audio
+
+# Events
+merge_gap = 4.0              # merge flagged regions closer than this (s)
+pad_before = 6.0
+pad_after = 4.0
+min_len = 8.0
+max_len = 60.0
+top = 20
+
+[presets.generic]
+description = "Balanced settings for most games."
+
+[presets.fortnite]
+description = "Fortnite: sustained build-fights and gunfights."
+w_sustained = 0.65
+w_transient = 0.35
+merge_gap = 5.0
+
+[presets.league]
+description = "League of Legends: long teamfights, lots of ability noise."
+w_sustained = 0.75
+w_transient = 0.25
+threshold = 0.55
+baseline_seconds = 120.0
+merge_gap = 6.0
+
+[presets.r6siege]
+description = "Rainbow Six Siege: quiet tactical play, then sharp gunfire and breaches."
+w_sustained = 0.3
+w_transient = 0.7
+threshold = 0.55
+baseline_percentile = 30.0
+transient_lookback = 4.0
+merge_gap = 3.0
+
+[presets.gta5_online]
+description = "GTA 5 Online: gunfights and crashes; suppresses car radio and cutscene music."
+w_sustained = 0.45
+w_transient = 0.55
+music_penalty = 0.75
+tonal_penalty = 0.5
+music_min_len = 12.0
+
+[presets.gta6]
+description = "GTA 6 (PS5 captures): like GTA 5 Online, tuned for louder mixes."
+w_sustained = 0.45
+w_transient = 0.55
+threshold = 0.65
+music_penalty = 0.75
+tonal_penalty = 0.5
+music_min_len = 12.0
