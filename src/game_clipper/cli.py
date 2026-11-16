@@ -555,5 +555,44 @@ def tune(
         console.print(f"Saved plot to [green]{plot}[/]")
 
 
+# ---------------------------------------------------------------------------
+# ui
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def ui(
+    out: Annotated[
+        Path | None, typer.Option("--out", "-o", help="Folder for clips. Default: ./output.")
+    ] = None,
+    host: Annotated[str, typer.Option(help="Interface to bind (keep it local).")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=0, max=65535, help="Port (0 = any free port).")] = 8765,
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="Don't open a browser tab.")
+    ] = False,
+) -> None:
+    """Open a local web page: drop in a recording, get clips back."""
+    import webbrowser
+
+    from game_clipper.web import create_server
+
+    try:
+        server = create_server(host, port, out)
+    except ffmpeg.FFmpegError as exc:
+        _fail(str(exc))
+    except OSError as exc:
+        _fail(f"Could not start the server on {host}:{port}: {exc}. Try --port 0.")
+    console.print(f"game-clipper UI running at [bold cyan]{server.url}[/]  (Ctrl+C to stop)")
+    console.print(f"Clips are saved under {server.out_root}")
+    if not no_browser:
+        webbrowser.open(server.url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("Stopped.")
+    finally:
+        server.server_close()
+
+
 if __name__ == "__main__":
     app()

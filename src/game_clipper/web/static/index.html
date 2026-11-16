@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>game-clipper</title>
+<style>
+  :root {
+    --bg: #f6f7fb; --panel: #ffffff; --text: #171a21; --muted: #5d6475; --line: #e3e6ee;
+    --accent: #6d4aff; --accent-ink: #ffffff; --ok: #12805c; --bad: #c62d42; --soft: #efeaff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1015; --panel: #171a21; --text: #e9ebf1; --muted: #9098ab; --line: #272b36;
+      --accent: #8b6dff; --accent-ink: #ffffff; --ok: #3ccf91; --bad: #ff6b7f; --soft: #221d3a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 28px 16px 64px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { margin: 0; font-size: 24px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+           padding: 20px; margin-bottom: 16px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+       margin: 0 0 12px; }
+  .drop { border: 2px dashed var(--line); border-radius: 12px; padding: 28px 16px; text-align: center;
+          cursor: pointer; transition: border-color .15s, background .15s; }
+  .drop:hover, .drop.over { border-color: var(--accent); background: var(--soft); }
+  .drop strong { display: block; font-size: 16px; }
+  .drop span { color: var(--muted); font-size: 14px; }
+  .chosen { margin-top: 10px; font-weight: 600; word-break: break-all; }
+  .or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px;
+        margin: 14px 0 10px; }
+  .or::before, .or::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  input[type=text], input[type=number], select {
+    width: 100%; padding: 9px 11px; border-radius: 9px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); font: inherit; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .hint { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+  .seg input { display: none; }
+  .seg label { margin: 0; padding: 8px 14px; cursor: pointer; color: var(--text); font-size: 14px; }
+  .seg input:checked + label { background: var(--accent); color: var(--accent-ink); }
+  .check { display: flex; gap: 8px; align-items: center; color: var(--text); font-size: 14px; margin: 0; }
+  details { margin-top: 14px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+  details .grid { margin-top: 12px; }
+  button { font: inherit; border: 0; border-radius: 10px; padding: 11px 20px; cursor: pointer; }
+  .primary { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .primary:disabled { opacity: .5; cursor: not-allowed; }
+  .ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 18px; flex-wrap: wrap; }
+  .bar { height: 10px; background: var(--line); border-radius: 99px; overflow: hidden; margin: 10px 0 6px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .status { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; flex-wrap: wrap; }
+  .error { color: var(--bad); white-space: pre-wrap; font-size: 14px; }
+  .done { color: var(--ok); }
+  .clips { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+  .clips.vertical { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  .clip { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .clip video { width: 100%; display: block; background: #000; aspect-ratio: 16 / 9; }
+  .clips.vertical video { aspect-ratio: 9 / 16; }
+  .clip .meta { padding: 10px 12px 12px; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .score { background: var(--accent); color: var(--accent-ink); border-radius: 99px; padding: 1px 10px;
+           font-weight: 600; font-size: 13px; }
+  .clip ul { margin: 6px 0 8px; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .clip a { color: var(--accent); font-size: 14px; text-decoration: none; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>game-clipper</h1>
+    <p>Drop a no-commentary gameplay recording. Get the action as clips.</p>
+  </header>
+
+  <form id="form" class="panel">
+    <h2>1. Recording</h2>
+    <div id="drop" class="drop" tabindex="0" role="button" aria-label="Choose a video file">
+      <strong>Drop a video here or click to browse</strong>
+      <span>MP4, MKV, MOV &middot; OBS recordings, stream VODs, PS5 captures</span>
+      <div id="chosen" class="chosen hidden"></div>
+    </div>
+    <input id="file" type="file" accept="video/*,.mkv,.mov" hidden>
+    <div class="or">or use a file already on this computer</div>
+    <input id="path" type="text" placeholder="C:\Users\you\Videos\match.mp4" autocomplete="off">
+    <p class="hint">A path skips the upload copy. Best for 1&ndash;3 hour recordings.</p>
+
+    <h2 style="margin-top:22px">2. Options</h2>
+    <div class="grid">
+      <div>
+        <label for="preset">Game preset</label>
+        <select id="preset"></select>
+        <p id="preset-desc" class="hint"></p>
+      </div>
+      <div>
+        <label for="top">Max clips</label>
+        <input id="top" type="number" min="1" max="200" value="20">
+      </div>
+      <div>
+        <label>Format</label>
+        <div class="seg">
+          <input type="radio" name="format" id="fmt-land" value="landscape" checked>
+          <label for="fmt-land">Landscape</label>
+          <input type="radio" name="format" id="fmt-vert" value="vertical">
+          <label for="fmt-vert">Shorts 9:16</label>
+        </div>
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <label class="check"><input id="copy" type="checkbox"> Fast cut (no re-encode)</label>
+        <p class="hint">Much faster; cuts snap to keyframes.</p>
+      </div>
+    </div>
+    <details>
+      <summary>Advanced tuning</summary>
+      <div class="grid">
+        <div><label for="threshold">Threshold</label>
+          <input id="threshold" type="number" step="0.05" min="0" placeholder="preset"></div>
+        <div><label for="pad_before">Seconds before</label>
+          <input id="pad_before" type="number" step="0.5" min="0" placeholder="6"></div>
+        <div><label for="pad_after">Seconds after</label>
+          <input id="pad_after" type="number" step="0.5" min="0" placeholder="4"></div>
+        <div><label for="min_len">Min length (s)</label>
+          <input id="min_len" type="number" step="1" min="0" placeholder="8"></div>
+        <div><label for="max_len">Max length (s)</label>
+          <input id="max_len" type="number" step="1" min="1" placeholder="60"></div>
+        <div><label for="audio_track">Audio track</label>
+          <input id="audio_track" type="number" step="1" min="0" value="0"></div>
+      </div>
+      <p class="hint">Lower the threshold to get more clips, raise it for fewer. OBS multi-track:
+        pick the track with game audio only.</p>
+    </details>
+    <div class="actions">
+      <button id="go" class="primary" type="submit">Find clips</button>
+      <span id="form-error" class="error"></span>
+    </div>
+  </form>
+
+  <section id="progress" class="panel hidden" aria-live="polite">
+    <h2>3. Working</h2>
+    <div class="status"><span id="stage">Starting</span><span id="pct">0%</span></div>
+    <div class="bar"><div id="fill"></div></div>
+    <div id="job-error" class="error"></div>
+    <div class="actions">
+      <button id="open" class="ghost hidden" type="button">Open output folder</button>
+      <span id="outdir" class="hint"></span>
+    </div>
+  </section>
+
+  <section id="clips" class="clips"></section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let uploadFile = null;
+let presets = [];
+
+async function api(path, options = {}) {
+  const res = await fetch(path, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+}
+
+async function loadPresets() {
+  presets = (await api("/api/presets")).presets;
+  const select = $("preset");
+  for (const p of presets) select.add(new Option(p.name, p.name));
+  select.value = "generic";
+  showPresetDescription();
+}
+function showPresetDescription() {
+  const p = presets.find((x) => x.name === $("preset").value);
+  $("preset-desc").textContent = p ? p.description : "";
+}
+
+function chooseFile(file) {
+  if (!file) return;
+  uploadFile = file;
+  $("path").value = "";
+  const mb = (file.size / 1e6).toFixed(file.size > 1e9 ? 0 : 1);
+  $("chosen").textContent = `${file.name} (${mb} MB)`;
+  $("chosen").classList.remove("hidden");
+}
+
+function upload(file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload");
+    xhr.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+    xhr.upload.onprogress = (e) => e.lengthComputable && setProgress("Uploading", e.loaded / e.total);
+    xhr.onload = () => {
+      const data = JSON.parse(xhr.responseText || "{}");
+      xhr.status < 300 ? resolve(data.path) : reject(new Error(data.error || "Upload failed"));
+    };
+    xhr.onerror = () => reject(new Error("Upload failed"));
+    xhr.send(file);
+  });
+}
+
+function setProgress(stage, fraction) {
+  $("stage").textContent = stage;
+  const pct = Math.round(Math.max(0, Math.min(1, fraction)) * 100);
+  $("pct").textContent = `${pct}%`;
+  $("fill").style.width = `${pct}%`;
+}
+
+const STAGES = { queued: "Queued", analysing: "Analysing audio", exporting: "Exporting clips",
+                 done: "Done", error: "Failed" };
+const shown = new Set();
+
+function renderClips(job) {
+  const grid = $("clips");
+  grid.classList.toggle("vertical", job.vertical);
+  for (const c of job.clips) {
+    if (shown.has(c.file)) continue;
+    shown.add(c.file);
+    const card = document.createElement("article");
+    card.className = "clip";
+    const video = document.createElement("video");
+    video.src = c.url; video.controls = true; video.preload = "metadata";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const row = document.createElement("div");
+    row.className = "row";
+    const title = document.createElement("strong");
+    title.textContent = `#${c.index} \u00b7 ${c.start} \u2013 ${c.end}`;
+    const score = document.createElement("span");
+    score.className = "score"; score.textContent = c.score; score.title = "Action score (0-100)";
+    row.append(title, score);
+    const ul = document.createElement("ul");
+    for (const r of c.reasons) { const li = document.createElement("li"); li.textContent = r; ul.append(li); }
+    const link = document.createElement("a");
+    link.href = c.url; link.download = c.file; link.textContent = "Download";
+    meta.append(row, ul, link);
+    card.append(video, meta);
+    grid.append(card);
+  }
+}
+
+async function poll(id) {
+  const job = await api(`/api/jobs/${id}`);
+  setProgress(`${STAGES[job.status] || job.status}: ${job.message}`, job.progress);
+  renderClips(job);
+  if (job.status === "error") {
+    $("job-error").textContent = job.error;
+    finish();
+  } else if (job.status === "done") {
+    $("stage").classList.add("done");
+    if (job.clips.length) {
+      $("open").classList.remove("hidden");
+      $("outdir").textContent = job.out_dir;
+      $("open").onclick = () => api(`/api/jobs/${id}/open`, { method: "POST" })
+        .catch((e) => ($("job-error").textContent = e.message));
+    }
+    finish();
+  } else {
+    setTimeout(() => poll(id).catch(fail), 700);
+  }
+}
+
+function finish() { $("go").disabled = false; $("go").textContent = "Find clips"; }
+function fail(e) { $("job-error").textContent = e.message; finish(); }
+
+$("form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("form-error").textContent = "";
+  const typed = $("path").value.trim();
+  if (!typed && !uploadFile) { $("form-error").textContent = "Choose a video or paste its path."; return; }
+  const vertical = $("fmt-vert").checked;
+  if (vertical && $("copy").checked) {
+    $("form-error").textContent = "Shorts format needs re-encoding; untick Fast cut.";
+    return;
+  }
+
+  $("go").disabled = true; $("go").textContent = "Working\u2026";
+  $("progress").classList.remove("hidden");
+  $("job-error").textContent = ""; $("stage").classList.remove("done");
+  $("open").classList.add("hidden"); $("outdir").textContent = "";
+  $("clips").replaceChildren(); shown.clear();
+  try {
+    const path = typed || await upload(uploadFile);
+    const body = { path, preset: $("preset").value, vertical, copy: $("copy").checked };
+    for (const key of ["top", "threshold", "pad_before", "pad_after", "min_len", "max_len", "audio_track"]) {
+      if ($(key).value !== "") body[key] = $(key).value;
+    }
+    setProgress("Queued", 0);
+    const job = await api("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" },
+                                         body: JSON.stringify(body) });
+    await poll(job.id);
+  } catch (e) {
+    fail(e);
+  }
+});
+
+const drop = $("drop");
+drop.addEventListener("click", () => $("file").click());
+drop.addEventListener("keydown", (e) => (e.key === "Enter" || e.key === " ") && $("file").click());
+$("file").addEventListener("change", (e) => chooseFile(e.target.files[0]));
+["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => {
+  e.preventDefault(); drop.classList.add("over");
+}));
+["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => {
+  e.preventDefault(); drop.classList.remove("over");
+}));
+drop.addEventListener("drop", (e) => chooseFile(e.dataTransfer.files[0]));
+$("path").addEventListener("input", () => {
+  if ($("path").value.trim()) { uploadFile = null; $("chosen").classList.add("hidden"); }
+});
+$("preset").addEventListener("change", showPresetDescription);
+$("fmt-vert").addEventListener("change", () => ($("copy").checked = false));
+loadPresets().catch((e) => ($("form-error").textContent = e.message));
+</script>
+</body>
+</html>
