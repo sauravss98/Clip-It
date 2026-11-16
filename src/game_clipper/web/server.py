@@ -2,8 +2,9 @@
 
 It binds to 127.0.0.1 by default and is meant for the person running it. Videos
 can be uploaded through the browser, or referenced by local path to avoid copying
-multi-gigabyte recordings. Jobs run one at a time on a background thread (the GPU
-encoder is the bottleneck anyway) and the page polls for progress.
+multi-gigabyte recordings. Jobs (clipping and model training) run one at a time on
+a background thread (the GPU is the bottleneck anyway) and the page polls for
+progress. Clips can be rated 👍/👎 to build the user's own training set.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,7 +27,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
-from game_clipper import config, export, ffmpeg, pipeline, report
+from game_clipper import config, export, ffmpeg, pipeline, report, training, vision
 from game_clipper.events import format_clock
 
 COPY_CHUNK = 1024 * 1024
@@ -48,6 +50,7 @@ class JobRequest:
     vertical: bool = False
     copy: bool = False
     audio_track: int = 0
+    vision: bool = True
     overrides: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -75,6 +78,7 @@ class JobRequest:
             vertical=bool(data.get("vertical")),
             copy=bool(data.get("copy")),
             audio_track=int(data.get("audio_track") or 0),
+            vision=bool(data.get("vision", True)),
             overrides=overrides,
         )
         if request.vertical and request.copy:
@@ -83,14 +87,34 @@ class JobRequest:
         return request
 
 
+def clip_dict(folder: Path, record: report.ClipRecord, labels: dict[str, int]) -> dict[str, Any]:
+    """JSON for one clip card (shared by jobs and the library)."""
+    name = record.filename or ""
+    return {
+        "index": record.index,
+        "folder": folder.name,
+        "file": name,
+        "url": f"/files/{quote(folder.name)}/{quote(name)}",
+        "start": format_clock(record.event.start),
+        "end": format_clock(record.event.end),
+        "duration": round(record.event.duration, 1),
+        "score": round(record.event.score),
+        "reasons": list(record.event.reasons),
+        "label": labels.get(name),
+    }
+
+
 @dataclass
 class Job:
-    """State of a clipping job; read by the HTTP thread, written by the worker."""
+    """State of a job; read by the HTTP thread, written by the worker."""
 
     id: str
-    request: JobRequest
+    title: str
     out_dir: Path
-    status: str = "queued"  # queued | analysing | exporting | done | error
+    request: JobRequest | None = None  # clip jobs
+    task: Callable[[Job], None] | None = None  # other jobs (training)
+    kind: str = "clip"
+    status: str = "queued"  # queued | analysing | looking | exporting | training | done | error
     progress: float = 0.0
     message: str = "Waiting in queue"
     error: str | None = None
@@ -110,28 +134,18 @@ class Job:
             clips = list(self.clips)
             data = {
                 "id": self.id,
-                "video": self.request.path.name,
+                "kind": self.kind,
+                "video": self.title,
                 "status": self.status,
                 "progress": round(self.progress, 4),
                 "message": self.message,
                 "error": self.error,
                 "encoder": self.encoder,
                 "out_dir": str(self.out_dir),
-                "vertical": self.request.vertical,
+                "vertical": bool(self.request and self.request.vertical),
             }
-        data["clips"] = [
-            {
-                "index": r.index,
-                "file": r.filename,
-                "url": f"/clips/{self.id}/{quote(r.filename or '')}",
-                "start": format_clock(r.event.start),
-                "end": format_clock(r.event.end),
-                "duration": round(r.event.duration, 1),
-                "score": round(r.event.score),
-                "reasons": list(r.event.reasons),
-            }
-            for r in clips
-        ]
+        labels = training.read_labels(self.out_dir) if clips else {}
+        data["clips"] = [clip_dict(self.out_dir, r, labels) for r in clips]
         return data
 
 
@@ -141,39 +155,114 @@ class JobManager:
     def __init__(self, out_root: Path) -> None:
         self.out_root = out_root
         self.jobs: dict[str, Job] = {}
+        self._embedder: Any = None  # one CLIP model shared by all jobs (slow to load)
         self._queue: queue.Queue[Job] = queue.Queue()
         self._worker = threading.Thread(target=self._work, name="clip-worker", daemon=True)
         self._worker.start()
 
-    def submit(self, request: JobRequest) -> Job:
-        """Queue a job and return it immediately."""
-        suffix = f"_{request.preset}" + ("_vertical" if request.vertical else "")
-        job = Job(
-            id=uuid.uuid4().hex[:12],
-            request=request,
-            out_dir=self.out_root / f"{request.path.stem}{suffix}",
-        )
+    def reranker(self, preset: str) -> Any:
+        """Vision reranker for ``preset`` (with its trained model), or None if unavailable."""
+        if not vision.available():
+            return None
+        from game_clipper.vision import model as hm
+        from game_clipper.vision.embedder import ClipEmbedder
+        from game_clipper.vision.rerank import VisionReranker
+
+        if self._embedder is None:
+            self._embedder = ClipEmbedder()
+        path = hm.model_path(preset)
+        model = hm.HighlightModel.load(path) if path.is_file() else None
+        return VisionReranker(embedder=self._embedder, model=model)
+
+    def _enqueue(self, job: Job) -> Job:
         self.jobs[job.id] = job
         self._queue.put(job)
         return job
+
+    def submit(self, request: JobRequest) -> Job:
+        """Queue a clipping job and return it immediately."""
+        suffix = f"_{request.preset}" + ("_vertical" if request.vertical else "")
+        return self._enqueue(
+            Job(
+                id=uuid.uuid4().hex[:12],
+                title=request.path.name,
+                out_dir=self.out_root / f"{request.path.stem}{suffix}",
+                request=request,
+            )
+        )
+
+    def submit_training(self, preset: str) -> Job:
+        """Queue training of the user's model for ``preset``."""
+        if preset not in config.available_presets():
+            raise ValueError(f"Unknown preset '{preset}'")
+
+        def task(job: Job) -> None:
+            job.update(status="training", message="Collecting your rated clips")
+            if not vision.available():
+                raise RuntimeError(vision.INSTALL_HINT)
+            _, rep, path = training.train(
+                self.out_root,
+                preset,
+                reranker_factory=lambda: self.reranker(preset),
+                on_status=lambda msg: job.update(message=msg),
+            )
+            verdict = (
+                "beats the audio ranking"
+                if rep.model_auc > rep.baseline_auc
+                else "doesn't beat the audio ranking yet; rate more clips"
+            )
+            job.update(
+                status="done",
+                progress=1.0,
+                message=(
+                    f"Trained on {rep.n_samples} clips ({rep.n_positive} 👍) from "
+                    f"{rep.n_groups} video(s). Held-out AUC: audio {rep.baseline_auc:.2f} → "
+                    f"your model {rep.model_auc:.2f}; precision@{rep.k}: "
+                    f"{rep.baseline_precision_at_k:.0%} → {rep.model_precision_at_k:.0%}. "
+                    f"The model {verdict}. Saved to {path}."
+                ),
+            )
+
+        return self._enqueue(
+            Job(
+                id=uuid.uuid4().hex[:12],
+                title=f"Train {preset} model",
+                out_dir=self.out_root,
+                task=task,
+                kind="train",
+            )
+        )
 
     def _work(self) -> None:
         while True:
             job = self._queue.get()
             try:
-                run_job(job)
+                if job.task is not None:
+                    job.task(job)
+                else:
+                    run_job(job, self)
             except Exception as exc:  # report anything to the page instead of dying
                 job.update(status="error", error=str(exc), message="Failed")
             finally:
                 self._queue.task_done()
 
 
-def run_job(job: Job) -> None:
-    """Analyse and export one job, updating its progress along the way."""
+def run_job(job: Job, manager: JobManager) -> None:
+    """Analyse and export one clipping job, updating its progress along the way."""
     req = job.request
+    assert req is not None
     settings = config.load_settings(req.preset, overrides=req.overrides)
     info = pipeline.probe_input(req.path, req.audio_track)
     duration = max(info.duration, 1.0)
+    reranker = manager.reranker(req.preset) if req.vision and info.has_video else None
+
+    def on_vision(done: int, total: int) -> None:
+        note = " with your model" if reranker is not None and reranker.model else ""
+        job.update(
+            status="looking",
+            message=f"Looking at {total} candidate moments{note}",
+            progress=done / max(total, 1),
+        )
 
     job.update(status="analysing", message="Listening for action", progress=0.0)
     analysis = pipeline.analyse(
@@ -182,6 +271,8 @@ def run_job(job: Job) -> None:
         info,
         audio_track=req.audio_track,
         on_progress=lambda s: job.update(progress=min(s / duration, 1.0)),
+        reranker=reranker,
+        on_vision_progress=on_vision,
     )
     events = analysis.selection.kept
     if not events:
@@ -229,6 +320,7 @@ def run_job(job: Job) -> None:
         preset=req.preset,
         settings=settings,
         vertical=req.vertical,
+        features=analysis.features,
     )
     note = ""
     if encoder == "h264_nvenc" and "libx264" in result.encoders:
@@ -297,6 +389,38 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Expected a JSON object")
         return data
 
+    def _run_folder(self, name: str) -> Path:
+        """Resolve an output folder name, refusing anything outside the output root."""
+        folder = (self.server.out_root / name).resolve()
+        if name in ("", ".", "..") or "/" in name or "\\" in name:
+            raise ValueError("Bad folder name")
+        if folder.parent != self.server.out_root or not (folder / "events.json").is_file():
+            raise ValueError("Unknown clip folder")
+        return folder
+
+    def _library(self) -> dict[str, Any]:
+        runs = []
+        for run in training.find_runs(self.server.out_root):
+            runs.append(
+                {
+                    "folder": run.folder.name,
+                    "video": Path(run.video).name,
+                    "preset": run.preset,
+                    "rated": len(run.labels),
+                    "clips": [clip_dict(run.folder, r, run.labels) for r in run.records],
+                }
+            )
+        presets = sorted({r["preset"] for r in runs})
+        models = {}
+        if vision.available():
+            from game_clipper.vision import model as hm
+
+            for name in config.available_presets():
+                path = hm.model_path(name)
+                if path.is_file():
+                    models[name] = hm.HighlightModel.load(path).meta
+        return {"runs": runs, "presets": presets, "models": models, "vision": vision.available()}
+
     def _job(self, job_id: str) -> Job | None:
         job = self.server.manager.jobs.get(job_id)
         if job is None:
@@ -318,17 +442,23 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/presets":
             presets = [{"name": n, "description": d} for n, d in config.available_presets().items()]
             self._send_json({"presets": presets, "default": config.DEFAULT_PRESET})
+        elif path == "/api/library":
+            self._send_json(self._library())
         elif len(parts) == 3 and parts[:2] == ["api", "jobs"]:
             if job := self._job(parts[2]):
                 self._send_json(job.to_dict())
-        elif len(parts) == 3 and parts[0] == "clips":
-            if job := self._job(parts[1]):
-                with job.lock:
-                    names = {r.filename for r in job.clips}
-                if parts[2] not in names:  # only serve files this job produced
-                    self._error("Unknown clip", HTTPStatus.NOT_FOUND)
-                else:
-                    self._send_file(job.out_dir / parts[2])
+        elif len(parts) == 3 and parts[0] == "files":
+            try:
+                folder = self._run_folder(parts[1])
+            except ValueError:
+                self._error("Unknown clip", HTTPStatus.NOT_FOUND)
+                return
+            target = folder / parts[2]
+            # Only serve exported clips that sit directly in a run folder.
+            if target.suffix.lower() != ".mp4" or target.resolve().parent != folder:
+                self._error("Unknown clip", HTTPStatus.NOT_FOUND)
+            else:
+                self._send_file(target)
         else:
             self._error("Not found", HTTPStatus.NOT_FOUND)
 
@@ -341,6 +471,19 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/jobs":
                 request = JobRequest.from_json(self._read_json())
                 self._send_json(self.server.manager.submit(request).to_dict(), HTTPStatus.CREATED)
+            elif path == "/api/label":
+                data = self._read_json()
+                folder = self._run_folder(str(data.get("folder", "")))
+                name = str(data.get("file", ""))
+                if not (folder / name).is_file() or Path(name).name != name:
+                    raise ValueError("Unknown clip")
+                label = data.get("label")
+                labels = training.write_label(folder, name, None if label is None else int(label))
+                self._send_json({"label": labels.get(name), "rated": len(labels)})
+            elif path == "/api/train":
+                preset = str(self._read_json().get("preset") or config.DEFAULT_PRESET)
+                job = self.server.manager.submit_training(preset)
+                self._send_json(job.to_dict(), HTTPStatus.CREATED)
             elif len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "open":
                 if job := self._job(parts[2]):
                     if not job.out_dir.is_dir():

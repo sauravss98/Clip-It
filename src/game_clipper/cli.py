@@ -611,6 +611,62 @@ def tune(
 
 
 # ---------------------------------------------------------------------------
+# train
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def train(
+    preset: PresetOpt = config.DEFAULT_PRESET,
+    out: Annotated[
+        Path, typer.Option("--out", "-o", help="Folder containing your clip runs.")
+    ] = Path("output"),
+) -> None:
+    """Train your own highlight model from clips you rated 👍/👎 in the UI."""
+    from game_clipper import training, vision
+
+    if not vision.available():
+        _fail(vision.INSTALL_HINT)
+    from game_clipper.vision.rerank import VisionReranker
+
+    try:
+        _, rep, path = training.train(
+            out.resolve(),
+            preset,
+            reranker_factory=VisionReranker,
+            on_status=lambda msg: console.print(f"[dim]{msg}[/]"),
+        )
+    except training.TrainingError as exc:
+        _fail(str(exc))
+
+    table = Table(title=f"{preset} model, evaluated on held-out videos", title_justify="left")
+    table.add_column("")
+    table.add_column("Audio only", justify="right")
+    table.add_column("Your model", justify="right", style="bold green")
+    table.add_row("ROC-AUC", f"{rep.baseline_auc:.2f}", f"{rep.model_auc:.2f}")
+    table.add_row(
+        f"Precision@{rep.k}",
+        f"{rep.baseline_precision_at_k:.0%}",
+        f"{rep.model_precision_at_k:.0%}",
+    )
+    console.print(
+        f"{rep.n_samples} rated clips ({rep.n_positive} 👍) from {rep.n_groups} video(s)."
+    )
+    console.print(table)
+    if rep.n_groups < 2:
+        console.print(
+            "[yellow]Only one video is rated, so these numbers are optimistic. "
+            "Rate clips from more recordings for an honest estimate.[/]"
+        )
+    elif rep.model_auc <= rep.baseline_auc:
+        console.print(
+            "[yellow]The model doesn't beat the audio ranking yet. Rate more clips; "
+            "it is still saved and will improve.[/]"
+        )
+    console.print(f"Saved [green]{path}[/]. The next `clip --preset {preset}` will use it.")
+
+
+# ---------------------------------------------------------------------------
 # ui
 # ---------------------------------------------------------------------------
 

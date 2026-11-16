@@ -40,11 +40,43 @@ def event_to_dict(record: ClipRecord) -> dict[str, Any]:
             "mean": round(e.mean, 4),
             "transient": round(e.transient, 4),
             "active_seconds": round(e.active, 2),
+            "loud_db": round(e.loud_db, 2),
+            "music": round(e.music, 3),
         },
         "reasons": list(e.reasons),
         "source": e.source,
         "clip": record.filename,
     }
+
+
+def event_from_dict(data: dict[str, Any]) -> Event:
+    """Rebuild an :class:`Event` from its events.json entry."""
+    m = data.get("metrics", {})
+    return Event(
+        start=float(data["start"]),
+        end=float(data["end"]),
+        peak_time=float(data.get("peak_time", data["start"])),
+        peak=float(m.get("peak", 0.0)),
+        mean=float(m.get("mean", 0.0)),
+        transient=float(m.get("transient", 0.0)),
+        active=float(m.get("active_seconds", 0.0)),
+        loud_db=float(m.get("loud_db", 0.0)),
+        music=float(m.get("music", 1.0)),
+        score=float(data.get("score", 0.0)),
+        reasons=tuple(data.get("reasons", ())),
+        source=str(data.get("source", "loudness")),
+    )
+
+
+def read_events_json(path: Path) -> tuple[dict[str, Any], list[ClipRecord]]:
+    """Read events.json back: ``(metadata, records)``."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    records = [
+        ClipRecord(int(item["index"]), event_from_dict(item), item.get("clip"))
+        for item in payload.get("events", [])
+    ]
+    meta = {k: v for k, v in payload.items() if k != "events"}
+    return meta, records
 
 
 def write_events_json(

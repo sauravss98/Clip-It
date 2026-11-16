@@ -7,6 +7,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -94,7 +95,9 @@ def test_upload_then_clip_end_to_end(server: ClipperServer, sample_video: Path) 
 
     # The sample is a steady tone with no action, so force a clip with a zero threshold.
     status, job = post_json(
-        server, "/api/jobs", {"path": str(uploaded), "threshold": 0, "top": 1, "min_len": 2}
+        server,
+        "/api/jobs",
+        {"path": str(uploaded), "threshold": 0, "top": 1, "min_len": 2, "vision": False},
     )
     assert status == 201
     deadline = time.time() + 60
@@ -110,5 +113,35 @@ def test_upload_then_clip_end_to_end(server: ClipperServer, sample_video: Path) 
     status, headers, body = request(server, "GET", url, headers={"Range": "bytes=0-99"})
     assert status == 206 and len(body) == 100
     assert headers["Content-Range"].startswith("bytes 0-99/")
-    status, _, _ = request(server, "GET", f"/clips/{job['id']}/..%2F..%2Fsecret.txt")
-    assert status == 404
+    folder = quote(job["clips"][0]["folder"])
+    for bad in (f"/files/{folder}/..%2F..%2Fsecret.txt", f"/files/{folder}/events.json",
+                "/files/..%2F/x.mp4", f"/files/{folder}/missing.mp4"):  # fmt: skip
+        assert request(server, "GET", bad)[0] == 404, bad
+
+    # Rating: set, read back through the library, clear.
+    clip = job["clips"][0]
+    status, data = post_json(
+        server, "/api/label", {"folder": clip["folder"], "file": clip["file"], "label": 1}
+    )
+    assert status == 200 and data == {"label": 1, "rated": 1}
+    _, _, body = request(server, "GET", "/api/library")
+    runs = json.loads(body)["runs"]
+    assert runs[0]["rated"] == 1 and runs[0]["clips"][0]["label"] == 1
+    status, data = post_json(
+        server, "/api/label", {"folder": clip["folder"], "file": clip["file"], "label": None}
+    )
+    assert data["label"] is None
+    status, data = post_json(
+        server, "/api/label", {"folder": "..", "file": clip["file"], "label": 1}
+    )
+    assert status == 400
+
+
+def test_training_job_reports_missing_labels(server: ClipperServer) -> None:
+    status, job = post_json(server, "/api/train", {"preset": "fortnite"})
+    assert status == 201
+    deadline = time.time() + 30
+    while job["status"] not in ("done", "error") and time.time() < deadline:
+        time.sleep(0.1)
+        job = json.loads(request(server, "GET", f"/api/jobs/{job['id']}")[2])
+    assert job["status"] == "error"

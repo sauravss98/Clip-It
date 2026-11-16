@@ -39,7 +39,7 @@
   input[type=text], input[type=number], select {
     width: 100%; padding: 9px 11px; border-radius: 9px; border: 1px solid var(--line);
     background: var(--bg); color: var(--text); font: inherit; }
-  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
   .hint { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
@@ -71,6 +71,16 @@
            font-weight: 600; font-size: 13px; }
   .clip ul { margin: 6px 0 8px; padding-left: 18px; color: var(--muted); font-size: 13px; }
   .clip a { color: var(--accent); font-size: 14px; text-decoration: none; }
+  .rate { display: inline-flex; gap: 6px; }
+  .rate button { padding: 4px 10px; border: 1px solid var(--line); background: transparent;
+                 color: var(--text); font-size: 15px; border-radius: 8px; }
+  .rate button.on.up { background: var(--ok); border-color: var(--ok); color: #fff; }
+  .rate button.on.down { background: var(--bad); border-color: var(--bad); color: #fff; }
+  .run { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+  .run summary { color: var(--text); font-weight: 600; }
+  .run summary span { color: var(--muted); font-weight: 400; }
+  .run .clips { margin-top: 12px; }
+  .model-line { font-size: 14px; margin: 0 0 12px; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -115,8 +125,9 @@
       </div>
       <div>
         <label>&nbsp;</label>
-        <label class="check"><input id="copy" type="checkbox"> Fast cut (no re-encode)</label>
-        <p class="hint">Much faster; cuts snap to keyframes.</p>
+        <label class="check"><input id="vision" type="checkbox" checked> Smart filter (local AI)</label>
+        <p id="vision-hint" class="hint">Drops menus and lobbies; uses your model if you trained one.</p>
+        <label class="check" style="margin-top:8px"><input id="copy" type="checkbox"> Fast cut (no re-encode)</label>
       </div>
     </div>
     <details>
@@ -135,8 +146,8 @@
         <div><label for="audio_track">Audio track</label>
           <input id="audio_track" type="number" step="1" min="0" value="0"></div>
       </div>
-      <p class="hint">Lower the threshold to get more clips, raise it for fewer. OBS multi-track:
-        pick the track with game audio only.</p>
+      <p class="hint">Lower the threshold to get more clips, raise it for fewer. Fast cut is much
+        quicker but cuts snap to keyframes. OBS multi-track: pick the game-audio track.</p>
     </details>
     <div class="actions">
       <button id="go" class="primary" type="submit">Find clips</button>
@@ -153,15 +164,35 @@
       <button id="open" class="ghost hidden" type="button">Open output folder</button>
       <span id="outdir" class="hint"></span>
     </div>
+    <p id="rate-hint" class="hint hidden">Rate clips 👍/👎 to teach your model what a good clip is.</p>
   </section>
 
   <section id="clips" class="clips"></section>
+
+  <section class="panel" style="margin-top:16px">
+    <h2>Your model</h2>
+    <p id="model-line" class="model-line">Loading&hellip;</p>
+    <div class="grid" style="align-items:end">
+      <div><label for="train-preset">Game</label><select id="train-preset"></select></div>
+      <div><button id="train" class="primary" type="button">Train my model</button></div>
+    </div>
+    <p class="hint">Rate at least 10 clips (with both 👍 and 👎) for a game, then train.
+      Training runs on your PC; nothing is uploaded. Rating clips from several recordings
+      gives an honest score.</p>
+    <p id="train-status" class="hint"></p>
+  </section>
+
+  <section class="panel">
+    <h2>Your clips</h2>
+    <div id="library"><p class="hint">Loading&hellip;</p></div>
+  </section>
 </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
 let uploadFile = null;
 let presets = [];
+let library = { runs: [], models: {}, vision: false };
 
 async function api(path, options = {}) {
   const res = await fetch(path, options);
@@ -169,12 +200,16 @@ async function api(path, options = {}) {
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }
+const postJSON = (path, body) => api(path, { method: "POST",
+  headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 async function loadPresets() {
   presets = (await api("/api/presets")).presets;
-  const select = $("preset");
-  for (const p of presets) select.add(new Option(p.name, p.name));
-  select.value = "generic";
+  for (const id of ["preset", "train-preset"]) {
+    const select = $(id);
+    for (const p of presets) select.add(new Option(p.name, p.name));
+    select.value = "generic";
+  }
   showPresetDescription();
 }
 function showPresetDescription() {
@@ -213,8 +248,48 @@ function setProgress(stage, fraction) {
   $("fill").style.width = `${pct}%`;
 }
 
-const STAGES = { queued: "Queued", analysing: "Analysing audio", exporting: "Exporting clips",
-                 done: "Done", error: "Failed" };
+// --- clip cards -------------------------------------------------------------
+
+function el(tag, props = {}, children = []) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+}
+
+function makeCard(c) {
+  const video = el("video", { src: c.url, controls: true, preload: "metadata" });
+  const title = el("strong", { textContent: `#${c.index} \u00b7 ${c.start} \u2013 ${c.end}` });
+  const score = el("span", { className: "score", textContent: c.score, title: "Action score (0-100)" });
+  const reasons = el("ul", {}, c.reasons.map((r) => el("li", { textContent: r })));
+  const up = el("button", { type: "button", className: "up", textContent: "👍", title: "Good clip" });
+  const down = el("button", { type: "button", className: "down", textContent: "👎", title: "Bad clip" });
+  const paint = (label) => {
+    up.classList.toggle("on", label === 1);
+    down.classList.toggle("on", label === 0);
+  };
+  paint(c.label);
+  const rate = async (value) => {
+    const next = c.label === value ? null : value;  // clicking again clears the rating
+    try {
+      const res = await postJSON("/api/label", { folder: c.folder, file: c.file, label: next });
+      c.label = res.label ?? null;
+      paint(c.label);
+      refreshLibrarySoon();
+    } catch (e) { alert(e.message); }
+  };
+  up.onclick = () => rate(1);
+  down.onclick = () => rate(0);
+  const link = el("a", { href: c.url, download: c.file, textContent: "Download" });
+  const footer = el("div", { className: "row" }, [link, el("span", { className: "rate" }, [up, down])]);
+  const meta = el("div", { className: "meta" },
+    [el("div", { className: "row" }, [title, score]), reasons, footer]);
+  return el("article", { className: "clip" }, [video, meta]);
+}
+
+// --- jobs -------------------------------------------------------------------
+
+const STAGES = { queued: "Queued", analysing: "Listening for action", looking: "Smart filter",
+                 exporting: "Exporting clips", training: "Training", done: "Done", error: "Failed" };
 const shown = new Set();
 
 function renderClips(job) {
@@ -223,26 +298,7 @@ function renderClips(job) {
   for (const c of job.clips) {
     if (shown.has(c.file)) continue;
     shown.add(c.file);
-    const card = document.createElement("article");
-    card.className = "clip";
-    const video = document.createElement("video");
-    video.src = c.url; video.controls = true; video.preload = "metadata";
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    const row = document.createElement("div");
-    row.className = "row";
-    const title = document.createElement("strong");
-    title.textContent = `#${c.index} \u00b7 ${c.start} \u2013 ${c.end}`;
-    const score = document.createElement("span");
-    score.className = "score"; score.textContent = c.score; score.title = "Action score (0-100)";
-    row.append(title, score);
-    const ul = document.createElement("ul");
-    for (const r of c.reasons) { const li = document.createElement("li"); li.textContent = r; ul.append(li); }
-    const link = document.createElement("a");
-    link.href = c.url; link.download = c.file; link.textContent = "Download";
-    meta.append(row, ul, link);
-    card.append(video, meta);
-    grid.append(card);
+    grid.append(makeCard(c));
   }
 }
 
@@ -257,11 +313,13 @@ async function poll(id) {
     $("stage").classList.add("done");
     if (job.clips.length) {
       $("open").classList.remove("hidden");
+      $("rate-hint").classList.remove("hidden");
       $("outdir").textContent = job.out_dir;
       $("open").onclick = () => api(`/api/jobs/${id}/open`, { method: "POST" })
         .catch((e) => ($("job-error").textContent = e.message));
     }
     finish();
+    loadLibrary();
   } else {
     setTimeout(() => poll(id).catch(fail), 700);
   }
@@ -284,22 +342,103 @@ $("form").addEventListener("submit", async (event) => {
   $("go").disabled = true; $("go").textContent = "Working\u2026";
   $("progress").classList.remove("hidden");
   $("job-error").textContent = ""; $("stage").classList.remove("done");
-  $("open").classList.add("hidden"); $("outdir").textContent = "";
+  $("open").classList.add("hidden"); $("rate-hint").classList.add("hidden");
+  $("outdir").textContent = "";
   $("clips").replaceChildren(); shown.clear();
   try {
     const path = typed || await upload(uploadFile);
-    const body = { path, preset: $("preset").value, vertical, copy: $("copy").checked };
+    const body = { path, preset: $("preset").value, vertical, copy: $("copy").checked,
+                   vision: $("vision").checked };
     for (const key of ["top", "threshold", "pad_before", "pad_after", "min_len", "max_len", "audio_track"]) {
       if ($(key).value !== "") body[key] = $(key).value;
     }
     setProgress("Queued", 0);
-    const job = await api("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" },
-                                         body: JSON.stringify(body) });
+    const job = await postJSON("/api/jobs", body);
     await poll(job.id);
   } catch (e) {
     fail(e);
   }
 });
+
+// --- library and model ------------------------------------------------------
+
+let libraryTimer = null;
+function refreshLibrarySoon() {
+  clearTimeout(libraryTimer);
+  libraryTimer = setTimeout(() => loadLibrary().catch(() => {}), 600);
+}
+
+function describeModel() {
+  const preset = $("train-preset").value;
+  const m = library.models[preset];
+  const runs = library.runs.filter((r) => r.preset === preset);
+  const rated = runs.reduce((n, r) => n + r.rated, 0);
+  const ratedText = `${rated} rated ${preset} clip${rated === 1 ? "" : "s"} from ${runs.filter((r) => r.rated).length} recording(s).`;
+  if (!library.vision) {
+    $("model-line").textContent = "Install the vision extra to train a model: pip install -e \".[vision]\"";
+    $("train").disabled = true;
+    return;
+  }
+  $("model-line").textContent = m
+    ? `Trained on ${m.n_samples} clips from ${m.n_videos} video(s); held-out AUC ${Number(m.cv_auc).toFixed(2)} vs audio ${Number(m.baseline_auc).toFixed(2)}. ${ratedText}`
+    : `No ${preset} model yet. ${ratedText}`;
+}
+
+async function loadLibrary() {
+  library = await api("/api/library");
+  if (!library.vision) {
+    $("vision").checked = false; $("vision").disabled = true;
+    $("vision-hint").textContent = "Install the vision extra to enable: pip install -e \".[vision]\"";
+  }
+  const box = $("library");
+  const openFolders = new Set([...box.querySelectorAll("details[open]")].map((d) => d.dataset.folder));
+  if (!library.runs.length) {
+    box.replaceChildren(el("p", { className: "hint", textContent: "No clips yet. Find some above!" }));
+  } else {
+    box.replaceChildren(...library.runs.map((run) => {
+      const vertical = run.folder.endsWith("_vertical");
+      const grid = el("div", { className: `clips${vertical ? " vertical" : ""}` });
+      const details = el("details", { className: "run" }, [
+        el("summary", {}, [`${run.video} `,
+          el("span", { textContent: `\u00b7 ${run.preset} \u00b7 ${run.clips.length} clips \u00b7 ${run.rated} rated` })]),
+        grid,
+      ]);
+      details.dataset.folder = run.folder;
+      // Build the cards only when opened: many <video> tags are heavy.
+      details.addEventListener("toggle", () => {
+        if (details.open && !grid.childElementCount) grid.append(...run.clips.map(makeCard));
+      });
+      if (openFolders.has(run.folder)) details.open = true;
+      return details;
+    }));
+  }
+  describeModel();
+}
+
+$("train").addEventListener("click", async () => {
+  const preset = $("train-preset").value;
+  $("train").disabled = true;
+  $("train-status").classList.remove("error");
+  $("train-status").textContent = "Starting\u2026";
+  try {
+    const job = await postJSON("/api/train", { preset });
+    const check = async () => {
+      const j = await api(`/api/jobs/${job.id}`);
+      $("train-status").textContent = j.status === "error" ? j.error : j.message;
+      $("train-status").classList.toggle("error", j.status === "error");
+      if (j.status === "done" || j.status === "error") {
+        $("train").disabled = false;
+        loadLibrary();
+      } else setTimeout(check, 800);
+    };
+    await check();
+  } catch (e) {
+    $("train-status").textContent = e.message;
+    $("train").disabled = false;
+  }
+});
+
+// --- wiring -----------------------------------------------------------------
 
 const drop = $("drop");
 drop.addEventListener("click", () => $("file").click());
@@ -315,9 +454,14 @@ drop.addEventListener("drop", (e) => chooseFile(e.dataTransfer.files[0]));
 $("path").addEventListener("input", () => {
   if ($("path").value.trim()) { uploadFile = null; $("chosen").classList.add("hidden"); }
 });
-$("preset").addEventListener("change", showPresetDescription);
+$("preset").addEventListener("change", () => {
+  showPresetDescription();
+  $("train-preset").value = $("preset").value;
+  describeModel();
+});
+$("train-preset").addEventListener("change", describeModel);
 $("fmt-vert").addEventListener("change", () => ($("copy").checked = false));
-loadPresets().catch((e) => ($("form-error").textContent = e.message));
+loadPresets().then(loadLibrary).catch((e) => ($("form-error").textContent = e.message));
 </script>
 </body>
 </html>

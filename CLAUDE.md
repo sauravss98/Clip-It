@@ -67,6 +67,7 @@ in v1: presets only change parameters and weights.
 game-clipper detect VIDEO [options]   # detect events, print a table, write events.json
 game-clipper clip   VIDEO [options]   # detect + export clips
 game-clipper tune   VIDEO [options]   # timeline summary (+ optional PNG plot) for tuning
+game-clipper train  [--preset --out]  # train the user's model from 👍/👎 ratings
 game-clipper ui     [--port --out]    # local drag-and-drop web UI (stdlib http.server)
 ```
  
@@ -74,6 +75,7 @@ Common options:
 `--out DIR`, `--preset {generic,fortnite,league,r6siege,gta5_online,gta6}`,
 `--config FILE`, `--top N`, `--threshold`, `--pad-before`, `--pad-after`,
 `--min-len`, `--max-len`, `--vertical`, `--reencode` / `--copy`, `--audio-track N`,
+`--vision` / `--no-vision`,
 `--dry-run`, `--verbose`.
  
 - Presets live in a config file (TOML) shipped with the package. Users can override them
@@ -85,6 +87,13 @@ Common options:
   paste a local path, pick preset/format, and preview/download clips. No extra
   dependencies; jobs run one at a time on a worker thread. The CLI and the UI share
   `pipeline.py` (probe -> analyse -> export -> reports); keep logic there, not in either UI.
+- Vision (added at the owner's request; **local only, no paid/online AI APIs**): optional
+  `[vision]` extra (torch + open_clip). Audio proposes 3x top-N candidates, `vision/rerank.py`
+  samples frames, CLIP zero-shot drops menus/lobbies/results screens, and a numpy logistic
+  regression trained on the owner's 👍/👎 (`labels.json` per output folder, features cached
+  in `vision.npz`) re-ranks. Models live in `%LOCALAPPDATA%/game-clipper/models/<preset>.npz`
+  (override `GAME_CLIPPER_HOME`). Evaluation is leave-one-video-out vs the audio baseline.
+  Tests use a fake embedder; CI never installs torch.
 ## Export
  
 - **Default `--reencode`**: frame-accurate cuts with `h264_nvenc`. Fall back to
@@ -123,6 +132,8 @@ game-clipper/
 │  ├─ events.py             # merge, pad, clamp, score, rank (pure functions)
 │  ├─ export.py             # cutting, NVENC fallback, vertical filter
 │  ├─ report.py             # events.json + index.html
+│  ├─ training.py           # ratings -> dataset -> model
+│  ├─ vision/               # frames, embedder (CLIP), scenes (zero-shot), rerank, model
 │  └─ web/                  # server.py (stdlib HTTP + job queue), static/index.html
 └─ tests/
    ├─ conftest.py           # synthetic video/audio generation with ffmpeg
@@ -131,6 +142,8 @@ game-clipper/
    ├─ test_export.py
    ├─ test_config.py
    ├─ test_cli.py
+   ├─ test_vision.py
+   ├─ test_training.py
    └─ test_web.py
 ```
  

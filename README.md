@@ -5,7 +5,8 @@
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
 **Automatically find the action in no-commentary gaming videos and export it as clips,
-ready for YouTube Shorts.** Works from game audio alone.
+ready for YouTube Shorts.** Listens to the game audio, looks at the frames with a local
+AI model, and learns your taste from 👍/👎 ratings. Everything runs offline on your PC.
 
 Most "AI clippers" transcribe speech and ask an LLM what's interesting. That falls apart
 on faceless gaming channels, where there's no voice at all. `game-clipper` listens to the
@@ -24,6 +25,10 @@ them, even out of a three-hour recording, without loading the video into memory.
   breach charge in a quiet R6 round.
 - **Music/radio suppression** so GTA car radio and cutscenes don't flood you with false
   clips.
+- **Smart filter (local AI, optional):** a CLIP vision model on your GPU looks at each
+  candidate and drops lobbies, menus, loading and victory screens.
+- **Your own model:** rate clips 👍/👎 and `game-clipper train` learns what *you* consider
+  a good clip, evaluated honestly on held-out recordings against the audio-only ranking.
 - **Fast export** with NVIDIA NVENC (auto-falls back to x264), or instant stream copy.
 - **Shorts-ready vertical output**: 1080x1920 with a blurred background fill.
 - **HDR to SDR** tone mapping for PS5 captures (best effort).
@@ -54,6 +59,17 @@ python -m venv .venv
 pip install -e .                # add [plot] for PNG plots in `tune`
 ```
 
+### 3. Optional: smart filter + trainable model (local AI)
+
+```powershell
+# NVIDIA GPU: install the CUDA build of PyTorch first (CPU also works, just slower)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+pip install -e ".[vision]"
+```
+
+The first run downloads the open CLIP model (~600 MB). After that everything is offline;
+no frames or clips ever leave your computer.
+
 ## Quick start
 
 ### The easy way: web UI
@@ -65,6 +81,9 @@ game-clipper ui
 A browser tab opens. Drop in a recording (or paste its path, which skips the upload copy
 for big files), pick your game, choose **Landscape** or **Shorts 9:16**, and hit
 **Find clips**. Clips appear as they finish exporting.
+
+Rate clips with 👍/👎 (on new clips or under **Your clips**). Once a game has 10+ rated
+clips, press **Train my model**. Future runs for that game rank clips with your model.
 
 ### Command line
 
@@ -80,6 +99,9 @@ game-clipper clip match.mp4 --copy
 
 # See why moments were (or weren't) picked, and save a plot
 game-clipper tune "gta session.mp4" --preset gta5_online --plot gta.png
+
+# Train your model from clips you rated in the UI
+game-clipper train --preset fortnite
 ```
 
 Output goes to `./output/<video name>/` (change with `--out`):
@@ -103,6 +125,7 @@ index.html                   # open in a browser to review
 | `--vertical` | 1080x1920 Shorts layout. |
 | `--reencode` / `--copy` | Frame-accurate re-encode (default) vs fast stream copy. |
 | `--audio-track N` | Which audio track to analyse (OBS multi-track recordings). |
+| `--vision` / `--no-vision` | Smart filter on/off (default: on when the `[vision]` extra is installed). |
 | `--config FILE` | Your own TOML presets (same format as [`presets.toml`](src/game_clipper/presets.toml)). |
 | `--dry-run` | Show what would happen; write nothing. |
 
@@ -142,6 +165,17 @@ begin a few seconds early. `--vertical` always re-encodes.
 6. **Ranking.** Each event is scored 0 to 100 from its peak, average intensity, sharpest
    onset and how long the action lasted. The top N are kept and exported in time order.
 
+7. **Smart filter (optional).** Audio proposes 3x more candidates than you asked for.
+   For each, six frames around the loudest moment are embedded with a local
+   [OpenCLIP](https://github.com/mlfoundations/open_clip) model and compared with text
+   descriptions ("a video game lobby", "a victory screen with a scoreboard", "intense
+   combat"...). Candidates that are mostly menus are dropped; the rest are re-ranked.
+8. **Your model (optional).** A regularised logistic regression (a *linear probe*) on
+   the CLIP embedding plus the audio metrics, trained on your ratings. It's evaluated
+   leave-one-video-out (clips from one recording look alike, so random splits would
+   flatter it) and compared with the audio-only ranking before you rely on it. Final
+   score = 40% audio + 60% your model.
+
 Presets only change numbers (weights, thresholds, window sizes). There is no
 game-specific code, so adding a game means adding a TOML section.
 
@@ -155,7 +189,8 @@ flowchart LR
     S & T & M --> C[Weighted score]
     C -->|threshold| E[Merge, pad, clamp]
     E --> R[Rank, top N]
-    R --> X[Export<br/>NVENC / x264 / copy]
+    R --> VZ[Smart filter<br/>CLIP + your model]
+    VZ --> X[Export<br/>NVENC / x264 / copy]
     X --> O[clips + events.json + index.html]
 ```
 
@@ -195,7 +230,7 @@ falls back to x264 automatically.
 
 ```
 src/game_clipper/
-  cli.py            typer app: detect / clip / tune / ui
+  cli.py            typer app: detect / clip / tune / train / ui
   pipeline.py       analyse -> export -> report, shared by CLI and UI
   config.py         preset + config loading and merging
   presets.toml      built-in presets
@@ -205,7 +240,9 @@ src/game_clipper/
   events.py         merge, pad, clamp, score, rank (pure functions)
   export.py         cutting, NVENC fallback, vertical filter, HDR tone mapping
   report.py         events.json + index.html
-  web/              stdlib HTTP server + single-page UI
+  training.py       ratings -> dataset -> trained model
+  vision/           frame sampling, CLIP embedder, zero-shot scenes, reranker, model
+  web/              stdlib HTTP server + single-page UI (rating, library, training)
 ```
 
 ## Roadmap
@@ -213,7 +250,8 @@ src/game_clipper/
 - **League of Legends detector** using the official Live Client Data API (real
   `ChampionKill`, `Multikill` and `Ace` events), possibly with a live mode that saves the
   OBS Replay Buffer over OBS WebSocket.
-- Kill-feed OCR / vision detectors (Fortnite "Eliminated", R6 kill feed).
+- Kill-feed OCR (Fortnite "Eliminated", R6 kill feed) as extra model features.
+- Learned audio embeddings (e.g. PANNs) instead of hand-made audio features.
 - Auto-captions and text hooks burned into vertical clips.
 - Packaged desktop app.
 
