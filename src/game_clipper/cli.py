@@ -83,6 +83,14 @@ DryRunOpt = Annotated[
     bool, typer.Option("--dry-run", help="Show what would happen; write nothing.")
 ]
 VerboseOpt = Annotated[bool, typer.Option("--verbose", "-v", help="Print settings and commands.")]
+VisionOpt = Annotated[
+    bool | None,
+    typer.Option(
+        "--vision/--no-vision",
+        help="Look at candidate clips with a local CLIP model to drop menus and re-rank "
+        "(default: on when the [vision] extra is installed).",
+    ),
+]
 
 
 @dataclass
@@ -96,6 +104,7 @@ class Run:
     timeline: Timeline
     selection: Selection
     out_dir: Path
+    features: list[Any] | None = None
 
 
 def _fail(message: str) -> None:
@@ -128,8 +137,9 @@ def _analyse(
     overrides: dict[str, Any],
     audio_track: int,
     verbose: bool,
+    vision: bool | None = False,
 ) -> Run:
-    """Check tools, probe the video, resolve settings and run the detector."""
+    """Check tools, probe the video, resolve settings and run the detectors."""
     try:
         settings = config.load_settings(preset, config_file, overrides)
         info = pipeline.probe_input(video, audio_track)
@@ -145,6 +155,7 @@ def _analyse(
         f"[bold]{video.name}[/]  {format_clock(info.duration)}  {res}{fps}{hdr}  "
         f"preset=[cyan]{preset}[/]"
     )
+    reranker = _make_reranker(preset, vision, info)
 
     with Progress(
         TextColumn("[progress.description]{task.description}"),
@@ -155,6 +166,12 @@ def _analyse(
         transient=True,
     ) as progress:
         task = progress.add_task("Analysing audio", total=max(info.duration, 1.0))
+        look = progress.add_task("Looking at candidates", total=None, visible=False)
+
+        def on_vision(done: int, total: int) -> None:
+            progress.update(task, visible=False)
+            progress.update(look, completed=done, total=total, visible=True)
+
         try:
             analysis = pipeline.analyse(
                 video,
@@ -162,9 +179,13 @@ def _analyse(
                 info,
                 audio_track=audio_track,
                 on_progress=lambda s: progress.update(task, completed=s),
+                reranker=reranker,
+                on_vision_progress=on_vision,
             )
         except ffmpeg.FFmpegError as exc:
             _fail(str(exc))
+        except (OSError, RuntimeError) as exc:  # model download / CUDA problems
+            _fail(f"Vision stage failed: {exc}. Run again with --no-vision to skip it.")
 
     return Run(
         video=video,
@@ -174,7 +195,36 @@ def _analyse(
         timeline=analysis.timeline,
         selection=analysis.selection,
         out_dir=out or Path.cwd() / "output" / video.stem,
+        features=analysis.features,
     )
+
+
+def _make_reranker(preset: str, vision: bool | None, info: ffmpeg.MediaInfo) -> Any:
+    """Build the vision reranker if requested/available, and say what it will do."""
+    from game_clipper import vision as vision_pkg
+
+    if vision is False or not info.has_video:
+        return None
+    if not vision_pkg.available():
+        if vision:
+            _fail(vision_pkg.INSTALL_HINT)
+        return None
+
+    from game_clipper.vision.rerank import VisionReranker
+
+    reranker = VisionReranker.for_preset(preset)
+    if reranker.model is not None:
+        meta = reranker.model.meta
+        console.print(
+            f"Vision: local CLIP + [green]your {preset} model[/] "
+            f"({meta.get('n_samples')} rated clips, CV AUC {meta.get('cv_auc', float('nan')):.2f})"
+        )
+    else:
+        console.print(
+            "Vision: local CLIP (menus/lobbies are dropped). [dim]Rate clips in "
+            "`game-clipper ui` and run `game-clipper train` to rank with your own model.[/]"
+        )
+    return reranker
 
 
 def _overrides(**kwargs: Any) -> dict[str, Any]:
@@ -219,6 +269,7 @@ def detect(
     min_len: MinLenOpt = None,
     max_len: MaxLenOpt = None,
     audio_track: TrackOpt = 0,
+    vision: VisionOpt = None,
     dry_run: DryRunOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
@@ -230,6 +281,7 @@ def detect(
         config_file=config_file,
         audio_track=audio_track,
         verbose=verbose,
+        vision=vision,
         overrides=_overrides(
             top=top,
             threshold=threshold,
@@ -287,6 +339,7 @@ def clip(
         ),
     ] = True,
     audio_track: TrackOpt = 0,
+    vision: VisionOpt = None,
     dry_run: DryRunOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
@@ -300,6 +353,7 @@ def clip(
         config_file=config_file,
         audio_track=audio_track,
         verbose=verbose,
+        vision=vision,
         overrides=_overrides(
             top=top,
             threshold=threshold,
@@ -371,6 +425,7 @@ def clip(
         preset=preset,
         settings=run.settings,
         vertical=vertical,
+        features=run.features,
     )
     console.print(
         f"[green]Done.[/] {len(result.records)} clips. Review them in [bold]{result.index_html}[/]"

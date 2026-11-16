@@ -62,7 +62,9 @@ def test_version() -> None:
 
 @requires_ffmpeg
 def test_detect_writes_events_json(action_video: Path, tmp_path: Path) -> None:
-    result = runner.invoke(app, ["detect", str(action_video), "--out", str(tmp_path)])
+    result = runner.invoke(
+        app, ["detect", str(action_video), "--out", str(tmp_path), "--no-vision"]
+    )
     assert result.exit_code == 0, result.stdout
     data = json.loads((tmp_path / "events.json").read_text(encoding="utf-8"))
     assert len(data["events"]) == 2
@@ -70,7 +72,9 @@ def test_detect_writes_events_json(action_video: Path, tmp_path: Path) -> None:
 
 @requires_ffmpeg
 def test_clip_exports_and_writes_review_page(action_video: Path, tmp_path: Path) -> None:
-    result = runner.invoke(app, ["clip", str(action_video), "--out", str(tmp_path), "--top", "1"])
+    result = runner.invoke(
+        app, ["clip", str(action_video), "--out", str(tmp_path), "--top", "1", "--no-vision"]
+    )
     assert result.exit_code == 0, result.stdout
     clips = list(tmp_path.glob("0001_*_score*.mp4"))
     assert len(clips) == 1
@@ -80,7 +84,9 @@ def test_clip_exports_and_writes_review_page(action_video: Path, tmp_path: Path)
 @requires_ffmpeg
 def test_clip_dry_run_writes_nothing(action_video: Path, tmp_path: Path) -> None:
     out = tmp_path / "dry"
-    result = runner.invoke(app, ["clip", str(action_video), "--out", str(out), "--dry-run"])
+    result = runner.invoke(
+        app, ["clip", str(action_video), "--out", str(out), "--dry-run", "--no-vision"]
+    )
     assert result.exit_code == 0 and "ffmpeg" in result.stdout
     assert not out.exists()
 

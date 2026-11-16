@@ -30,6 +30,12 @@ dependencies = [
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.8"]
+# Local vision reranker (CLIP). For NVIDIA GPUs install the CUDA build of torch first.
+vision = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "open_clip_torch>=2.24",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
