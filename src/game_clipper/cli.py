@@ -18,9 +18,9 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from game_clipper import __version__, config, export, ffmpeg, report
+from game_clipper import __version__, config, export, ffmpeg, pipeline, report
 from game_clipper.detectors.base import Event
-from game_clipper.detectors.loudness import DB_PER_UNIT, LoudnessDetector, Timeline
+from game_clipper.detectors.loudness import DB_PER_UNIT, Timeline
 from game_clipper.events import Selection, format_clock, mask_to_runs
 
 app = typer.Typer(
@@ -131,17 +131,10 @@ def _analyse(
 ) -> Run:
     """Check tools, probe the video, resolve settings and run the detector."""
     try:
-        ffmpeg.check_tools()
         settings = config.load_settings(preset, config_file, overrides)
-        info = ffmpeg.probe(video)
-    except (ffmpeg.FFmpegError, config.ConfigError) as exc:
+        info = pipeline.probe_input(video, audio_track)
+    except (ffmpeg.FFmpegError, config.ConfigError, pipeline.PipelineError) as exc:
         _fail(str(exc))
-    if not info.has_audio:
-        _fail(f"{video.name} has no audio track; game-clipper detects action from game audio.")
-    if audio_track >= info.audio_streams:
-        _fail(
-            f"--audio-track {audio_track} requested but the file has {info.audio_streams} track(s)."
-        )
 
     if verbose:
         console.print(f"[dim]Settings ({preset}):[/] {settings.to_dict()}")
@@ -162,23 +155,24 @@ def _analyse(
         transient=True,
     ) as progress:
         task = progress.add_task("Analysing audio", total=max(info.duration, 1.0))
-        detector = LoudnessDetector(
-            audio_track=audio_track,
-            on_progress=lambda s: progress.update(task, completed=s),
-        )
         try:
-            detector.detect(video, settings)
+            analysis = pipeline.analyse(
+                video,
+                settings,
+                info,
+                audio_track=audio_track,
+                on_progress=lambda s: progress.update(task, completed=s),
+            )
         except ffmpeg.FFmpegError as exc:
             _fail(str(exc))
 
-    assert detector.timeline is not None and detector.selection is not None
     return Run(
         video=video,
         info=info,
         settings=settings,
         preset=preset,
-        timeline=detector.timeline,
-        selection=detector.selection,
+        timeline=analysis.timeline,
+        selection=analysis.selection,
         out_dir=out or Path.cwd() / "output" / video.stem,
     )
 
@@ -322,23 +316,19 @@ def clip(
     if not run.info.has_video:
         _fail(f"{video.name} has no video stream to cut.")
 
-    tonemap = run.info.is_hdr and reencode
-    if tonemap:
+    options = pipeline.export_options(
+        run.info, reencode=reencode, vertical=vertical, audio_track=audio_track
+    )
+    if options.tonemap:
         console.print("[yellow]HDR source:[/] tone-mapping clips to SDR (best effort).")
     elif run.info.is_hdr:
         console.print("[yellow]HDR source:[/] --copy keeps HDR; some players will look washed out.")
 
-    options = export.ExportOptions(
-        reencode=reencode, vertical=vertical, tonemap=tonemap, audio_track=audio_track
-    )
     encoder = export.pick_video_encoder() if reencode else None
-    records = [
-        report.ClipRecord(i, e, export.clip_filename(i, e)) for i, e in enumerate(kept, start=1)
-    ]
     console.print(_events_table(kept, f"{len(kept)} clips"))
 
     if dry_run:
-        for r in records:
+        for r in pipeline.plan_records(kept):
             cmd = export.build_cut_command(
                 video,
                 run.out_dir / (r.filename or ""),
@@ -350,10 +340,7 @@ def clip(
             console.print(" ".join(f'"{a}"' if " " in a else a for a in cmd), soft_wrap=True)
         return
 
-    run.out_dir.mkdir(parents=True, exist_ok=True)
     console.print(f"Encoder: [cyan]{encoder or 'stream copy'}[/]  ->  {run.out_dir}")
-    total = sum(e.duration for e in kept)
-    used: set[str] = set()
     with Progress(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
@@ -361,43 +348,33 @@ def clip(
         TimeRemainingColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Exporting", total=total)
-        done = 0.0
-        for r in records:
-            assert r.filename is not None
-            progress.update(task, description=f"Exporting {r.index}/{len(records)}")
+        task = progress.add_task("Exporting clips", total=sum(e.duration for e in kept))
+        try:
+            result = pipeline.export_clips(
+                video,
+                kept,
+                run.out_dir,
+                options,
+                encoder=encoder,
+                on_progress=lambda s: progress.update(task, completed=s),
+            )
+        except ffmpeg.FFmpegError as exc:
+            _fail(str(exc))
 
-            def on_progress(seconds: float, base: float = done) -> None:
-                progress.update(task, completed=base + seconds)
-
-            try:
-                used.add(
-                    export.cut_clip(
-                        video,
-                        run.out_dir / r.filename,
-                        r.event,
-                        options,
-                        encoder=encoder,
-                        on_progress=on_progress,
-                    )
-                )
-            except ffmpeg.FFmpegError as exc:
-                _fail(str(exc))
-            done += r.event.duration
-            progress.update(task, completed=done)
-
-    if encoder == "h264_nvenc" and "libx264" in used:
+    if encoder == "h264_nvenc" and "libx264" in result.encoders:
         console.print("[yellow]NVENC failed for some clips; they were encoded with libx264.[/]")
-    meta = {"video": video, "preset": preset}
-    report.write_events_json(
-        run.out_dir / "events.json",
-        records,
+    pipeline.write_reports(
+        result,
+        run.out_dir,
+        video=video,
         duration=run.info.duration,
-        settings=run.settings.to_dict(),
-        **meta,
+        preset=preset,
+        settings=run.settings,
+        vertical=vertical,
     )
-    page = report.write_index_html(run.out_dir / "index.html", records, vertical=vertical, **meta)
-    console.print(f"[green]Done.[/] {len(records)} clips. Review them in [bold]{page}[/]")
+    console.print(
+        f"[green]Done.[/] {len(result.records)} clips. Review them in [bold]{result.index_html}[/]"
+    )
 
 
 # ---------------------------------------------------------------------------
