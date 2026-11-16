@@ -12,7 +12,13 @@ from urllib.parse import quote
 import pytest
 
 from conftest import requires_ffmpeg
-from game_clipper.web.server import ClipperServer, JobRequest, create_server, safe_filename
+from game_clipper.web.server import (
+    RANGE_CAP,
+    ClipperServer,
+    JobRequest,
+    create_server,
+    safe_filename,
+)
 
 pytestmark = requires_ffmpeg
 
@@ -113,6 +119,13 @@ def test_upload_then_clip_end_to_end(server: ClipperServer, sample_video: Path) 
     status, headers, body = request(server, "GET", url, headers={"Range": "bytes=0-99"})
     assert status == 206 and len(body) == 100
     assert headers["Content-Range"].startswith("bytes 0-99/")
+    # Open-ended ranges (what <video> sends) are capped so connections never stall.
+    size = (Path(job["out_dir"]) / job["clips"][0]["file"]).stat().st_size
+    status, headers, body = request(server, "GET", url, headers={"Range": "bytes=0-"})
+    assert status == 206 and len(body) == min(size, RANGE_CAP)
+    assert headers["Content-Range"] == f"bytes 0-{len(body) - 1}/{size}"
+    status, _, body = request(server, "GET", url)  # downloads get the whole file
+    assert status == 200 and len(body) == size
     folder = quote(job["clips"][0]["folder"])
     for bad in (f"/files/{folder}/..%2F..%2Fsecret.txt", f"/files/{folder}/events.json",
                 "/files/..%2F/x.mp4", f"/files/{folder}/missing.mp4"):  # fmt: skip

@@ -31,6 +31,7 @@ from game_clipper import config, export, ffmpeg, pipeline, report, training, vis
 from game_clipper.events import format_clock
 
 COPY_CHUNK = 1024 * 1024
+RANGE_CAP = 1024 * 1024  # max bytes per Range response (see Handler._send_file)
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._ -]+")
 
 
@@ -522,7 +523,14 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"path": str(target.resolve())}, HTTPStatus.CREATED)
 
     def _send_file(self, path: Path) -> None:
-        """Serve a file with HTTP Range support so <video> can seek."""
+        """Serve a file with HTTP Range support so <video> can seek.
+
+        Range responses are capped at :data:`RANGE_CAP` bytes. Browsers open
+        ``bytes=0-`` for every <video>, read the start, then pause *without closing
+        the connection*. Sending the whole file would leave each connection stuck,
+        and after six (Chrome's per-host limit) every other clip greys out while it
+        waits. Short ranges complete and close; the player asks for more as needed.
+        """
         if not path.is_file():
             self._error("Not found", HTTPStatus.NOT_FOUND)
             return
@@ -541,6 +549,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Range", f"bytes */{size}")
                 self.end_headers()
                 return
+            end = min(end, start + RANGE_CAP - 1)
             status = HTTPStatus.PARTIAL_CONTENT
 
         self.send_response(status)
