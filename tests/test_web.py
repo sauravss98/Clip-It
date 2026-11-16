@@ -158,3 +158,22 @@ def test_training_job_reports_missing_labels(server: ClipperServer) -> None:
         time.sleep(0.1)
         job = json.loads(request(server, "GET", f"/api/jobs/{job['id']}")[2])
     assert job["status"] == "error"
+
+
+def test_clips_play_while_job_is_still_exporting(server: ClipperServer) -> None:
+    """Regression: clips must be served before events.json exists (end of the job)."""
+    folder = server.out_root / "match in progress"
+    folder.mkdir()
+    (folder / "0001_00h00m05s_score50.mp4").write_bytes(b"\0" * 5000)
+    url = f"/files/{quote(folder.name)}/0001_00h00m05s_score50.mp4"
+    status, _, body = request(server, "GET", url, headers={"Range": "bytes=0-"})
+    assert status == 206 and len(body) == 5000
+    status, data = post_json(
+        server,
+        "/api/label",
+        {"folder": folder.name, "file": "0001_00h00m05s_score50.mp4", "label": 0},
+    )
+    assert status == 200 and data["label"] == 0
+    # Still locked to direct children of the output root.
+    (server.out_root.parent / "outside.mp4").write_bytes(b"x")
+    assert request(server, "GET", "/files/..%2F/outside.mp4")[0] == 404

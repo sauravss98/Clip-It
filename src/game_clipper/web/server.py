@@ -391,11 +391,15 @@ class Handler(BaseHTTPRequestHandler):
         return data
 
     def _run_folder(self, name: str) -> Path:
-        """Resolve an output folder name, refusing anything outside the output root."""
+        """Resolve an output folder name, refusing anything outside the output root.
+
+        Doesn't require events.json: it's written after the last clip, and clips
+        must be playable (and rateable) while a job is still exporting.
+        """
         folder = (self.server.out_root / name).resolve()
         if name in ("", ".", "..") or "/" in name or "\\" in name:
             raise ValueError("Bad folder name")
-        if folder.parent != self.server.out_root or not (folder / "events.json").is_file():
+        if folder.parent != self.server.out_root or not folder.is_dir():
             raise ValueError("Unknown clip folder")
         return folder
 
