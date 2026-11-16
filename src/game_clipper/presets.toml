@@ -42,6 +42,17 @@ min_len = 8.0
 max_len = 60.0
 top = 20
 
+# On-screen text: kill feed, chat and banners, read with local OCR ([ocr] extra).
+# Regions are [x0, y0, x1, y1] fractions of the frame (optionally + scale, min_text_px:
+# read the region shrunk by `scale`, skipping text lines shorter than min_text_px).
+# Only these regions are read, which keeps OCR fast.
+# text_events maps a phrase to its clip score, or {score, cooldown, team}. OCR typos are
+# tolerated. With player_name set, lines starting with your name get a bonus and other
+# players' kills are discounted, except team moments (team = true).
+text_scan = false
+text_interval = 3.0          # seconds between samples (chat lines stay up ~10 s)
+player_name = ""             # your in-game name: your own kills get a bonus
+
 [presets.generic]
 description = "Balanced settings for most games."
 
@@ -50,6 +61,17 @@ description = "Fortnite: sustained build-fights and gunfights."
 w_sustained = 0.65
 w_transient = 0.35
 merge_gap = 5.0
+text_scan = true
+text_interval = 2.5          # elimination popups are brief
+text_regions = [
+    [0.0, 0.30, 0.40, 0.70],                # kill feed (left)
+    [0.20, 0.10, 0.80, 0.80, 0.5, 10.0],    # elimination popup, VICTORY ROYALE
+]
+
+[presets.fortnite.text_events]
+"victory royale" = { score = 100, cooldown = 300, team = true }
+"eliminated" = 70
+"knocked" = 55
 
 [presets.league]
 description = "League of Legends: long teamfights, lots of ability noise."
@@ -58,6 +80,22 @@ w_transient = 0.25
 threshold = 0.55
 baseline_seconds = 120.0
 merge_gap = 6.0
+text_scan = true
+text_interval = 5.0          # kill lines stay in chat for ~10 s
+text_regions = [
+    [0.0, 0.40, 0.45, 0.88],                # chat / kill announcements (bottom left)
+    [0.25, 0.15, 0.75, 0.60, 0.5, 18.0],    # VICTORY banner: big text only
+]
+
+[presets.league.text_events]
+"penta kill" = 100
+"quadra kill" = 95
+"triple kill" = 90
+"ally team has scored an ace" = { score = 80, team = true }
+"double kill" = 65
+"first blood" = 60
+"shut down" = 45
+"victory" = { score = 88, cooldown = 300, team = true }
 
 [presets.r6siege]
 description = "Rainbow Six Siege: quiet tactical play, then sharp gunfire and breaches."
@@ -75,6 +113,12 @@ w_transient = 0.55
 music_penalty = 0.75
 tonal_penalty = 0.5
 music_min_len = 12.0
+text_scan = true
+text_regions = [[0.15, 0.25, 0.85, 0.65, 0.5, 18.0]]
+
+[presets.gta5_online.text_events]
+"mission passed" = { score = 80, cooldown = 120, team = true }
+"heist passed" = { score = 90, cooldown = 120, team = true }
 
 [presets.gta6]
 description = "GTA 6 (PS5 captures): like GTA 5 Online, tuned for louder mixes."

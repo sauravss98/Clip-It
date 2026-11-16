@@ -5,8 +5,9 @@
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
 **Automatically find the action in no-commentary gaming videos and export it as clips,
-ready for YouTube Shorts.** Listens to the game audio, looks at the frames with a local
-AI model, and learns your taste from 👍/👎 ratings. Everything runs offline on your PC.
+ready for YouTube Shorts.** Listens to the game audio, reads the kill feed and banners
+("triple kill", "VICTORY"), looks at the frames with a local AI model, and learns your
+taste from 👍/👎 ratings. Everything runs offline on your PC.
 
 Most "AI clippers" transcribe speech and ask an LLM what's interesting. That falls apart
 on faceless gaming channels, where there's no voice at all. `game-clipper` listens to the
@@ -25,6 +26,9 @@ them, even out of a three-hour recording, without loading the video into memory.
   breach charge in a quiet R6 round.
 - **Music/radio suppression** so GTA car radio and cutscenes don't flood you with false
   clips.
+- **Reads the screen (optional):** local OCR finds "triple kill", "ace", "VICTORY",
+  "ELIMINATED"... in the kill feed and banners, so big moments are clipped even when a
+  stream VOD's audio is flat. Set your in-game name and *your* kills rank first.
 - **Smart filter (local AI, optional):** a CLIP vision model on your GPU looks at each
   candidate and drops lobbies, menus, loading and victory screens.
 - **Your own model:** rate clips 👍/👎 and `game-clipper train` learns what *you* consider
@@ -69,6 +73,14 @@ pip install -e ".[vision]"
 
 The first run downloads the open CLIP model (~600 MB). After that everything is offline;
 no frames or clips ever leave your computer.
+
+### 4. Optional: read the kill feed and banners (local OCR)
+
+```powershell
+pip install -e ".[ocr]"
+```
+
+Small (~15 MB models), CPU only. Adds roughly 2-3 minutes per 20 minutes of footage.
 
 ## Quick start
 
@@ -126,6 +138,8 @@ index.html                   # open in a browser to review
 | `--reencode` / `--copy` | Frame-accurate re-encode (default) vs fast stream copy. |
 | `--audio-track N` | Which audio track to analyse (OBS multi-track recordings). |
 | `--vision` / `--no-vision` | Smart filter on/off (default: on when the `[vision]` extra is installed). |
+| `--text` / `--no-text` | Read kill feed and banners (default: per preset, when `[ocr]` is installed). |
+| `--player NAME` | Your in-game name: your own kills rank above other players'. |
 | `--config FILE` | Your own TOML presets (same format as [`presets.toml`](src/game_clipper/presets.toml)). |
 | `--dry-run` | Show what would happen; write nothing. |
 
@@ -165,16 +179,23 @@ begin a few seconds early. `--vertical` always re-encodes.
 6. **Ranking.** Each event is scored 0 to 100 from its peak, average intensity, sharpest
    onset and how long the action lasted. The top N are kept and exported in time order.
 
-7. **Smart filter (optional).** Audio proposes 3x more candidates than you asked for.
+7. **On-screen text (optional).** Every few seconds a frame is sampled and only the
+   preset's text regions (chat, kill feed, banner area) are read with local OCR.
+   Matching tolerates OCR typos ("fora triple killl", "JICTORY"). Repeated reads of
+   the same chat line become one moment, dated when it first appeared. Text moments
+   get a score floor (a penta kill scores ~100 even with flat audio) and are never
+   rejected by the smart filter.
+8. **Smart filter (optional).** Audio proposes 3x more candidates than you asked for.
    For each, six frames around the loudest moment are embedded with a local
    [OpenCLIP](https://github.com/mlfoundations/open_clip) model and compared with text
    descriptions ("a video game lobby", "a victory screen with a scoreboard", "intense
    combat"...). Candidates that are mostly menus are dropped; the rest are re-ranked.
-8. **Your model (optional).** A regularised logistic regression (a *linear probe*) on
+9. **Your model (optional).** A regularised logistic regression (a *linear probe*) on
    the CLIP embedding plus the audio metrics, trained on your ratings. It's evaluated
    leave-one-video-out (clips from one recording look alike, so random splits would
-   flatter it) and compared with the audio-only ranking before you rely on it. Final
-   score = 40% audio + 60% your model.
+   flatter it) and compared with the audio-only ranking. Its influence on the score
+   grows with that evidence: none until it beats the audio ranking, up to 60% once it
+   wins by 0.10 AUC on two or more recordings.
 
 Presets only change numbers (weights, thresholds, window sizes). There is no
 game-specific code, so adding a game means adding a TOML section.
@@ -182,6 +203,8 @@ game-specific code, so adding a game means adding a TOML section.
 ```mermaid
 flowchart LR
     V[Video] -->|ffmpeg PCM stream| F[Window features<br/>RMS, crest, flatness]
+    V -->|frames every few s| OCR[Kill feed / banner OCR]
+    OCR --> E
     F --> B[Rolling baseline]
     B --> S[Sustained score]
     F --> T[Transient score]
@@ -236,7 +259,7 @@ src/game_clipper/
   presets.toml      built-in presets
   ffmpeg.py         tool checks, probing, PCM streaming, encoder detection
   audio.py          per-window loudness / crest / flatness features
-  detectors/        Detector protocol + LoudnessDetector
+  detectors/        Detector protocol, LoudnessDetector, TextDetector (OCR)
   events.py         merge, pad, clamp, score, rank (pure functions)
   export.py         cutting, NVENC fallback, vertical filter, HDR tone mapping
   report.py         events.json + index.html
@@ -250,7 +273,7 @@ src/game_clipper/
 - **League of Legends detector** using the official Live Client Data API (real
   `ChampionKill`, `Multikill` and `Ace` events), possibly with a live mode that saves the
   OBS Replay Buffer over OBS WebSocket.
-- Kill-feed OCR (Fortnite "Eliminated", R6 kill feed) as extra model features.
+- Kill-feed text as extra model features; more games' phrases and regions.
 - Learned audio embeddings (e.g. PANNs) instead of hand-made audio features.
 - Auto-captions and text hooks burned into vertical clips.
 - Packaged desktop app.

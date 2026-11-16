@@ -16,6 +16,7 @@ from game_clipper.detectors.loudness import LoudnessDetector, Timeline, select
 from game_clipper.events import Selection
 
 if TYPE_CHECKING:
+    from game_clipper.detectors.text import TextDetector
     from game_clipper.vision.rerank import VisionReranker
 
 ProgressFn = Callable[[float], None]
@@ -72,22 +73,33 @@ def analyse(
     on_progress: ProgressFn | None = None,
     reranker: VisionReranker | None = None,
     on_vision_progress: Callable[[int, int], None] | None = None,
+    text_detector: TextDetector | None = None,
+    on_text_progress: ProgressFn | None = None,
 ) -> Analysis:
-    """Run the audio detector, then (optionally) the vision reranker.
+    """Run the audio detector, the on-screen text detector and the vision reranker.
 
-    ``on_progress`` receives seconds of audio processed; ``on_vision_progress``
+    Audio and text both *propose* moments (text catches kills and victories when the
+    audio is flat); vision then filters and re-ranks them. ``on_progress`` and
+    ``on_text_progress`` receive seconds of video processed; ``on_vision_progress``
     receives ``(candidates_done, candidates_total)``.
     """
     detector = LoudnessDetector(audio_track=audio_track, on_progress=on_progress)
     tl = detector.analyze(video, settings)
     # Prefer the container duration so padding can reach the true end of the video.
     duration = max(info.duration, len(tl.score) * tl.window)
+
+    text_events: list[Event] = []
+    if text_detector is not None and settings.text_scan and settings.text_events and info.has_video:
+        text_detector.on_progress = on_text_progress
+        text_events = text_detector.detect(video, settings)
+
     if reranker is None or not info.has_video:
-        return Analysis(info=info, timeline=tl, selection=select(tl, settings, duration))
+        selection = select(tl, settings, duration, extra=text_events)
+        return Analysis(info=info, timeline=tl, selection=selection)
 
     # Audio proposes a bigger pool; vision decides which of them make the cut.
     pool_settings = replace(settings, top=max(settings.top * VISION_POOL_FACTOR, 30))
-    pool = select(tl, pool_settings, duration)
+    pool = select(tl, pool_settings, duration, extra=text_events)
     total = len(pool.kept)
     result = reranker.rerank(
         video,

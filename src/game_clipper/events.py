@@ -48,6 +48,8 @@ def _combine(a: Event, b: Event) -> Event:
         active=total,
         loud_db=max(a.loud_db, b.loud_db),
         music=min(a.music, b.music),
+        boost=max(a.boost, b.boost),
+        source="+".join(dict.fromkeys(a.source.split("+") + b.source.split("+"))),
         reasons=reasons,
     )
 
@@ -108,7 +110,12 @@ def explain(event: Event) -> tuple[str, ...]:
         out.append(f"{event.active:.0f}s of sustained action")
     if event.music < 0.95:
         out.append(f"music-like audio penalised (x{event.music:.2f})")
-    return tuple(dict.fromkeys(out + list(event.reasons)))
+    # Merged events can carry many on-screen quotes; keep the two most telling ones,
+    # the player's own first.
+    quotes = [r for r in event.reasons if r.startswith("on screen")]
+    others = [r for r in event.reasons if not r.startswith("on screen")]
+    quotes.sort(key=lambda r: "(you)" not in r)
+    return tuple(dict.fromkeys(out + quotes[:2] + others))
 
 
 def score_event(event: Event) -> float:
@@ -117,6 +124,8 @@ def score_event(event: Event) -> float:
     Combines the peak window score, the average intensity, the strongest sudden
     jump and (a little) how long the action lasted. The curve saturates, so the
     number is for ranking and file names rather than an absolute measure.
+    Confirmed on-screen events (``boost``) set a floor: a triple kill read from the
+    kill feed ranks high even when the stream's audio is flat.
     """
     raw = (
         0.45 * event.peak
@@ -124,7 +133,7 @@ def score_event(event: Event) -> float:
         + 0.20 * event.transient
         + 0.25 * min(event.active / 10.0, 1.0)
     )
-    return round(100.0 * (1.0 - math.exp(-raw / 1.2)), 1)
+    return round(max(100.0 * (1.0 - math.exp(-raw / 1.2)), event.boost), 1)
 
 
 def select_events(

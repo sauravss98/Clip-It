@@ -95,10 +95,29 @@ def test_rerank_uses_trained_model(fake_frames: None) -> None:
         np.repeat(x, 10, axis=0), np.repeat([1.0, 0.0], 10), ["a"] * 10 + ["b"] * 10,
         np.zeros(20), preset="test",
     )  # fmt: skip
+    # Unproven model (no held-out evidence): rankings stay audio-driven.
+    model.meta.update(cv_auc=0.62, baseline_auc=0.62, n_videos=1)
     reranker.model = model
-    kept = reranker.rerank(Path("x.mp4"), [event(0, 40), event(100, 80)], top=1).selection.kept
+    candidates = [event(0, 40), event(100, 80)]
+    kept = reranker.rerank(Path("x.mp4"), candidates, top=1).selection.kept
+    assert kept[0].start == 100.0
+    # Proven on several recordings: the model now decides.
+    model.meta.update(cv_auc=0.90, baseline_auc=0.60, n_videos=3)
+    kept = reranker.rerank(Path("x.mp4"), candidates, top=1).selection.kept
     assert kept[0].start == 0.0
-    assert any("your model" in r for r in kept[0].reasons)
+    assert any("your model" in r and "trust 100%" in r for r in kept[0].reasons)
+
+
+def test_model_trust_grows_with_evidence() -> None:
+    m = hm.HighlightModel(np.zeros(2), 0.0, np.zeros(2), np.ones(2))
+    m.meta = {"cv_auc": 0.63, "baseline_auc": 0.62, "n_videos": 1}
+    assert m.trust == pytest.approx(0.05)
+    m.meta = {"cv_auc": 0.60, "baseline_auc": 0.70, "n_videos": 4}
+    assert m.trust == 0.0
+    m.meta = {"cv_auc": 0.85, "baseline_auc": 0.60, "n_videos": 3}
+    assert m.trust == 1.0
+    m.meta = {"cv_auc": float("nan"), "baseline_auc": 0.6, "n_videos": 3}
+    assert m.trust == 0.0
 
 
 def test_logistic_regression_learns_a_simple_rule() -> None:
@@ -149,3 +168,15 @@ def test_grab_frames_shape(sample_video: Path) -> None:
     assert frames.mean() > 10  # not blank
     # Letterboxed 16:9: the top rows are black padding.
     assert frames[:, :20].mean() < 1
+
+
+def test_rerank_keeps_confirmed_text_events_that_look_like_menus(fake_frames: None) -> None:
+    """A VICTORY banner can look like a menu to CLIP; on-screen text proved it's real."""
+    plan = {0.0: scenes.NOT_GAMEPLAY[3], 100.0: scenes.NOT_GAMEPLAY[3]}
+    victory = Event(start=0, end=15, peak_time=9, peak=3.0, score=88, boost=88, source="text")
+    lobby = event(100, 70)
+    result = rerank.VisionReranker(embedder=FakeEmbedder(plan)).rerank(  # type: ignore[arg-type]
+        Path("x.mp4"), [victory, lobby], top=5
+    )
+    assert [e.start for e in result.selection.kept] == [0.0]
+    assert "menu" in result.selection.dropped[0][1]

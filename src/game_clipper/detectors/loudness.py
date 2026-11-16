@@ -12,7 +12,7 @@ The weighted, penalised score is thresholded, and flagged windows become events.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -271,10 +271,13 @@ def candidates_from_timeline(tl: Timeline) -> list[Event]:
     return out
 
 
-def select(tl: Timeline, settings: Settings, duration: float) -> events.Selection:
-    """Build candidates from a timeline and run merge/pad/clamp/rank on them."""
+def select(
+    tl: Timeline, settings: Settings, duration: float, extra: Sequence[Event] = ()
+) -> events.Selection:
+    """Build candidates from a timeline (plus ``extra`` from other detectors) and
+    run merge/pad/clamp/rank on them."""
     return events.select_events(
-        candidates_from_timeline(tl),
+        candidates_from_timeline(tl) + list(extra),
         duration=duration,
         merge_gap=settings.merge_gap,
         pad_before=settings.pad_before,

@@ -19,6 +19,16 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class TextKeyword:
+    """An on-screen phrase worth clipping, e.g. "triple kill" or "victory royale"."""
+
+    phrase: str
+    score: float  # 0-100 clip score when it appears
+    cooldown: float = 15.0  # repeats within this many seconds belong to the same moment
+    team: bool = False  # team-wide moment (victory, ace): never discounted as "not yours"
+
+
+@dataclass(frozen=True)
 class Settings:
     """All tunable parameters for detection and event selection."""
 
@@ -44,6 +54,12 @@ class Settings:
     min_len: float = 8.0
     max_len: float = 60.0
     top: int = 20
+    # On-screen text (kill feed, chat, banners). Needs the [ocr] extra.
+    text_scan: bool = False
+    text_interval: float = 3.0
+    text_regions: tuple[tuple[float, ...], ...] = ()  # (x0, y0, x1, y1, scale, min_text_px)
+    text_events: tuple[TextKeyword, ...] = ()
+    player_name: str = ""
 
     def __post_init__(self) -> None:
         if self.window <= 0 or self.sample_rate <= 0:
@@ -59,14 +75,75 @@ class Settings:
                 raise ConfigError(f"{name} must be between 0 and 1")
         if not 0.0 <= self.baseline_percentile <= 100.0:
             raise ConfigError("baseline_percentile must be between 0 and 100")
+        if self.text_interval <= 0:
+            raise ConfigError("text_interval must be positive")
 
     def to_dict(self) -> dict[str, Any]:
         """Return the settings as a plain dict (for events.json)."""
         return asdict(self)
 
 
-_FIELD_TYPES = {f.name: f.type for f in fields(Settings)}
-_CASTS = {"int": int, "float": float, "str": str}
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in (
+        "true",
+        "1",
+        "yes",
+        "on",
+        "false",
+        "0",
+        "no",
+        "off",
+    ):
+        return value.lower() in ("true", "1", "yes", "on")
+    raise ValueError(value)
+
+
+def _to_regions(value: Any) -> tuple[tuple[float, ...], ...]:
+    """``[[x0, y0, x1, y1], [x0, y0, x1, y1, scale, min_text_px], ...]``.
+
+    Coordinates are fractions of the frame. ``scale`` shrinks the region before
+    reading (fine for big banner text) and ``min_text_px`` skips text lines shorter
+    than that many pixels (names and damage numbers over characters).
+    """
+    regions = []
+    for box in value:
+        nums = [float(v) for v in box]
+        if len(nums) == 4:
+            nums += [1.0, 0.0]
+        if len(nums) != 6:
+            raise ValueError(box)
+        x0, y0, x1, y1, scale, min_px = nums
+        if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1 and 0 < scale <= 1 and min_px >= 0):
+            raise ValueError(box)
+        regions.append((x0, y0, x1, y1, scale, min_px))
+    return tuple(regions)
+
+
+def _to_keywords(value: Any) -> tuple[TextKeyword, ...]:
+    """``{"triple kill" = 90, "victory" = {score = 85, cooldown = 180, team = true}}``."""
+    if not isinstance(value, dict):
+        raise ValueError(value)
+    out = []
+    for phrase, spec in value.items():
+        if isinstance(spec, dict):
+            out.append(
+                TextKeyword(
+                    str(phrase),
+                    float(spec["score"]),
+                    float(spec.get("cooldown", 15)),
+                    _to_bool(spec.get("team", False)),
+                )
+            )
+        else:
+            out.append(TextKeyword(str(phrase), float(spec)))
+    return tuple(out)
+
+
+_FIELD_TYPES = {f.name: str(f.type) for f in fields(Settings)}
+_CASTS: dict[str, Any] = {"int": int, "float": float, "str": str, "bool": _to_bool}
+_FIELD_CASTS: dict[str, Any] = {"text_regions": _to_regions, "text_events": _to_keywords}
 
 
 def _coerce(values: dict[str, Any], source: str) -> dict[str, Any]:
@@ -74,10 +151,10 @@ def _coerce(values: dict[str, Any], source: str) -> dict[str, Any]:
     for key, value in values.items():
         if key not in _FIELD_TYPES:
             raise ConfigError(f"Unknown setting '{key}' in {source}")
-        cast = _CASTS[str(_FIELD_TYPES[key])]
+        cast = _FIELD_CASTS.get(key) or _CASTS[_FIELD_TYPES[key]]
         try:
             out[key] = cast(value)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, KeyError) as exc:
             raise ConfigError(f"Invalid value for '{key}' in {source}: {value!r}") from exc
     return out
 

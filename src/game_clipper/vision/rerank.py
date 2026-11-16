@@ -23,7 +23,7 @@ from game_clipper.vision.frames import frame_times, grab_frames
 
 MENU_FRAME = 0.6  # a frame "is a menu" above this probability
 MENU_REJECT = 0.5  # reject an event when at least this share of its frames are menus
-MODEL_WEIGHT = 0.6  # final score = 40% audio + 60% trained model
+MODEL_WEIGHT = 0.6  # a fully trusted model sets 60% of the score (see HighlightModel.trust)
 
 
 @dataclass(frozen=True)
@@ -111,7 +111,9 @@ class VisionReranker:
         dropped: list[tuple[Event, str]] = []
         scored: list[tuple[Event, np.ndarray]] = []
         for event, vis in zip(candidates, seen, strict=True):
-            if vis.menu >= MENU_REJECT:
+            # On-screen text already proved it's a highlight (a VICTORY banner can
+            # look like a menu to CLIP), so only audio-only candidates can be rejected.
+            if vis.menu >= MENU_REJECT and event.boost <= 0:
                 dropped.append((event, f"vision: looks like a menu/lobby/results screen "
                                        f"({vis.menu:.0%} of frames)"))  # fmt: skip
                 continue
@@ -120,8 +122,10 @@ class VisionReranker:
             score = event.score
             if self.model is not None:
                 p = float(self.model.predict(features)[0])
-                score = round((1 - MODEL_WEIGHT) * event.score + MODEL_WEIGHT * 100 * p, 1)
-                notes.append(f"your model: {p:.0%} highlight")
+                weight = MODEL_WEIGHT * self.model.trust
+                score = round((1 - weight) * event.score + weight * 100 * p, 1)
+                score = max(score, event.boost)
+                notes.append(f"your model: {p:.0%} highlight (trust {self.model.trust:.0%})")
             reasons = tuple(dict.fromkeys(event.reasons + tuple(notes)))
             scored.append((replace(event, score=score, reasons=reasons), features))
 

@@ -91,6 +91,18 @@ VisionOpt = Annotated[
         "(default: on when the [vision] extra is installed).",
     ),
 ]
+TextOpt = Annotated[
+    bool | None,
+    typer.Option(
+        "--text/--no-text",
+        help="Read the kill feed, chat and banners (triple kill, VICTORY...) with local OCR "
+        "(default: per preset, when the [ocr] extra is installed).",
+    ),
+]
+PlayerOpt = Annotated[
+    str | None,
+    typer.Option("--player", help="Your in-game name: your own kills rank higher."),
+]
 
 
 @dataclass
@@ -138,6 +150,7 @@ def _analyse(
     audio_track: int,
     verbose: bool,
     vision: bool | None = False,
+    text: bool | None = False,
 ) -> Run:
     """Check tools, probe the video, resolve settings and run the detectors."""
     try:
@@ -156,6 +169,7 @@ def _analyse(
         f"preset=[cyan]{preset}[/]"
     )
     reranker = _make_reranker(preset, vision, info)
+    text_detector = _make_text_detector(settings, text, info)
 
     with Progress(
         TextColumn("[progress.description]{task.description}"),
@@ -166,10 +180,18 @@ def _analyse(
         transient=True,
     ) as progress:
         task = progress.add_task("Analysing audio", total=max(info.duration, 1.0))
+        read = progress.add_task(
+            "Reading on-screen text", total=max(info.duration, 1.0), visible=False
+        )
         look = progress.add_task("Looking at candidates", total=None, visible=False)
+
+        def on_text(seconds: float) -> None:
+            progress.update(task, visible=False)
+            progress.update(read, completed=seconds, visible=True)
 
         def on_vision(done: int, total: int) -> None:
             progress.update(task, visible=False)
+            progress.update(read, visible=False)
             progress.update(look, completed=done, total=total, visible=True)
 
         try:
@@ -181,6 +203,8 @@ def _analyse(
                 on_progress=lambda s: progress.update(task, completed=s),
                 reranker=reranker,
                 on_vision_progress=on_vision,
+                text_detector=text_detector,
+                on_text_progress=on_text,
             )
         except ffmpeg.FFmpegError as exc:
             _fail(str(exc))
@@ -197,6 +221,29 @@ def _analyse(
         out_dir=out or Path.cwd() / "output" / video.stem,
         features=analysis.features,
     )
+
+
+def _make_text_detector(
+    settings: config.Settings, text: bool | None, info: ffmpeg.MediaInfo
+) -> Any:
+    """Build the on-screen text detector if this run should read text."""
+    from game_clipper.detectors import text as text_mod
+
+    wanted = settings.text_scan if text is None else text
+    if not wanted or not info.has_video:
+        return None
+    if not settings.text_events:
+        if text:
+            _fail("This preset has no on-screen phrases (text_events) to look for.")
+        return None
+    if not text_mod.available():
+        if text:
+            _fail(text_mod.INSTALL_HINT)
+        return None
+    phrases = ", ".join(k.phrase for k in settings.text_events[:4])
+    you = f" (you: {settings.player_name})" if settings.player_name else ""
+    console.print(f"On-screen text: looking for {phrases}...{you}")
+    return text_mod.TextDetector()
 
 
 def _make_reranker(preset: str, vision: bool | None, info: ffmpeg.MediaInfo) -> Any:
@@ -270,6 +317,8 @@ def detect(
     max_len: MaxLenOpt = None,
     audio_track: TrackOpt = 0,
     vision: VisionOpt = None,
+    text: TextOpt = None,
+    player: PlayerOpt = None,
     dry_run: DryRunOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
@@ -282,6 +331,7 @@ def detect(
         audio_track=audio_track,
         verbose=verbose,
         vision=vision,
+        text=text,
         overrides=_overrides(
             top=top,
             threshold=threshold,
@@ -289,6 +339,7 @@ def detect(
             pad_after=pad_after,
             min_len=min_len,
             max_len=max_len,
+            player_name=player,
         ),
     )
     kept = run.selection.kept
@@ -340,6 +391,8 @@ def clip(
     ] = True,
     audio_track: TrackOpt = 0,
     vision: VisionOpt = None,
+    text: TextOpt = None,
+    player: PlayerOpt = None,
     dry_run: DryRunOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
@@ -354,6 +407,7 @@ def clip(
         audio_track=audio_track,
         verbose=verbose,
         vision=vision,
+        text=text,
         overrides=_overrides(
             top=top,
             threshold=threshold,
@@ -361,6 +415,7 @@ def clip(
             pad_after=pad_after,
             min_len=min_len,
             max_len=max_len,
+            player_name=player,
         ),
     )
     kept = run.selection.kept

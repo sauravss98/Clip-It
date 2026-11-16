@@ -177,3 +177,14 @@ def test_clips_play_while_job_is_still_exporting(server: ClipperServer) -> None:
     # Still locked to direct children of the output root.
     (server.out_root.parent / "outside.mp4").write_bytes(b"x")
     assert request(server, "GET", "/files/..%2F/outside.mp4")[0] == 404
+
+
+def test_existing_upload_is_reused(server: ClipperServer) -> None:
+    server.upload_dir.mkdir(parents=True, exist_ok=True)
+    (server.upload_dir / "match.mp4").write_bytes(b"x" * 10)
+    _, _, body = request(server, "GET", "/api/upload/existing?name=match.mp4&size=10")
+    assert Path(json.loads(body)["path"]).name == "match.mp4"
+    _, _, body = request(server, "GET", "/api/upload/existing?name=match.mp4&size=11")
+    assert json.loads(body)["path"] is None
+    _, _, body = request(server, "GET", "/api/upload/existing?name=..%2F..%2Fx&size=1")
+    assert json.loads(body)["path"] is None

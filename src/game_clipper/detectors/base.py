@@ -26,6 +26,7 @@ class Event:
     active: float = 0.0  # seconds of flagged audio
     loud_db: float = 0.0  # strongest sustained loudness above the baseline (dB)
     music: float = 1.0  # strongest music penalty applied (1 = none)
+    boost: float = 0.0  # score floor from a confirmed on-screen event (e.g. "triple kill")
     score: float = 0.0  # 0-100 ranking score
     reasons: tuple[str, ...] = field(default_factory=tuple)  # detector-specific notes
     source: str = "loudness"

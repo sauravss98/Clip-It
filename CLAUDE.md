@@ -75,7 +75,7 @@ Common options:
 `--out DIR`, `--preset {generic,fortnite,league,r6siege,gta5_online,gta6}`,
 `--config FILE`, `--top N`, `--threshold`, `--pad-before`, `--pad-after`,
 `--min-len`, `--max-len`, `--vertical`, `--reencode` / `--copy`, `--audio-track N`,
-`--vision` / `--no-vision`,
+`--vision` / `--no-vision`, `--text` / `--no-text`, `--player NAME`,
 `--dry-run`, `--verbose`.
  
 - Presets live in a config file (TOML) shipped with the package. Users can override them
@@ -93,7 +93,14 @@ Common options:
   regression trained on the owner's 👍/👎 (`labels.json` per output folder, features cached
   in `vision.npz`) re-ranks. Models live in `%LOCALAPPDATA%/game-clipper/models/<preset>.npz`
   (override `GAME_CLIPPER_HOME`). Evaluation is leave-one-video-out vs the audio baseline.
-  Tests use a fake embedder; CI never installs torch.
+  Tests use a fake embedder; CI never installs torch. The trained model's weight scales
+  with `HighlightModel.trust` (held-out AUC gain over audio, >=2 recordings).
+- On-screen text (owner's request, after audio missed a triple kill/victory in a stream
+  VOD): `detectors/text.py` `TextDetector` (optional `[ocr]` extra, RapidOCR on CPU)
+  reads per-preset `text_regions` every `text_interval` s, fuzzy-matches `text_events`
+  phrases, groups re-reads of the same line, and emits events with a `boost` score floor.
+  `player_name` gives the owner's own kills a bonus. Text events are merged with audio
+  candidates in `pipeline.analyse` and never rejected by the vision menu filter.
 ## Export
  
 - **Default `--reencode`**: frame-accurate cuts with `h264_nvenc`. Fall back to
@@ -128,7 +135,8 @@ game-clipper/
 │  ├─ audio.py              # loudness/transient/spectral feature extraction
 │  ├─ detectors/
 │  │  ├─ base.py            # Detector protocol, Event dataclass
-│  │  └─ loudness.py
+│  │  ├─ loudness.py
+│  │  └─ text.py            # OCR of kill feed / banners
 │  ├─ events.py             # merge, pad, clamp, score, rank (pure functions)
 │  ├─ export.py             # cutting, NVENC fallback, vertical filter
 │  ├─ report.py             # events.json + index.html
@@ -144,6 +152,7 @@ game-clipper/
    ├─ test_cli.py
    ├─ test_vision.py
    ├─ test_training.py
+   ├─ test_text.py
    └─ test_web.py
 ```
  

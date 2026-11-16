@@ -127,7 +127,14 @@
         <label>&nbsp;</label>
         <label class="check"><input id="vision" type="checkbox" checked> Smart filter (local AI)</label>
         <p id="vision-hint" class="hint">Drops menus and lobbies; uses your model if you trained one.</p>
+        <label class="check" style="margin-top:8px"><input id="text" type="checkbox" checked> Read kill feed &amp; banners</label>
+        <p id="text-hint" class="hint">Finds triple kills, aces, VICTORY... even when the audio is quiet. Adds a few minutes.</p>
         <label class="check" style="margin-top:8px"><input id="copy" type="checkbox"> Fast cut (no re-encode)</label>
+      </div>
+      <div>
+        <label for="player_name">Your in-game name (optional)</label>
+        <input id="player_name" type="text" placeholder="e.g. Inf3rno0990" autocomplete="off">
+        <p class="hint">Your own kills rank above everyone else's.</p>
       </div>
     </div>
     <details>
@@ -203,14 +210,45 @@ async function api(path, options = {}) {
 const postJSON = (path, body) => api(path, { method: "POST",
   headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
+// Remember choices between visits (per browser; harmless if storage is blocked).
+const PREFS_KEY = "game-clipper-prefs";
+function loadPrefs() {
+  try { return JSON.parse(localStorage.getItem(PREFS_KEY) || "{}"); } catch { return {}; }
+}
+function savePrefs() {
+  const prefs = { preset: $("preset").value, player_name: $("player_name").value.trim(),
+                  vertical: $("fmt-vert").checked, top: $("top").value };
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* ignore */ }
+}
+
 async function loadPresets() {
   presets = (await api("/api/presets")).presets;
+  const prefs = loadPrefs();
+  const start = presets.some((p) => p.name === prefs.preset) ? prefs.preset : "generic";
   for (const id of ["preset", "train-preset"]) {
     const select = $(id);
     for (const p of presets) select.add(new Option(p.name, p.name));
-    select.value = "generic";
+    select.value = start;
   }
+  if (prefs.player_name) $("player_name").value = prefs.player_name;
+  if (prefs.vertical) $("fmt-vert").checked = true;
+  if (prefs.top) $("top").value = prefs.top;
   showPresetDescription();
+}
+
+function updateTextOption() {
+  const supported = (library.text_presets || []).includes($("preset").value);
+  const box = $("text");
+  if (!library.ocr) {
+    box.checked = false; box.disabled = true;
+    $("text-hint").textContent = "Install the OCR extra to enable: pip install -e \".[ocr]\"";
+  } else if (!supported) {
+    box.disabled = true;
+    $("text-hint").textContent = "Not set up for this game preset yet.";
+  } else {
+    box.disabled = false;
+    $("text-hint").textContent = "Finds triple kills, aces, VICTORY... even when the audio is quiet. Adds a few minutes.";
+  }
 }
 function showPresetDescription() {
   const p = presets.find((x) => x.name === $("preset").value);
@@ -224,6 +262,12 @@ function chooseFile(file) {
   const mb = (file.size / 1e6).toFixed(file.size > 1e9 ? 0 : 1);
   $("chosen").textContent = `${file.name} (${mb} MB)`;
   $("chosen").classList.remove("hidden");
+}
+
+// Re-dropping the same file reuses the earlier upload instead of copying it again.
+async function existingUpload(file) {
+  const q = new URLSearchParams({ name: file.name, size: String(file.size) });
+  try { return (await api(`/api/upload/existing?${q}`)).path; } catch { return null; }
 }
 
 function upload(file) {
@@ -288,7 +332,8 @@ function makeCard(c) {
 
 // --- jobs -------------------------------------------------------------------
 
-const STAGES = { queued: "Queued", analysing: "Listening for action", looking: "Smart filter",
+const STAGES = { queued: "Queued", analysing: "Listening for action", reading: "Reading the screen",
+                 looking: "Smart filter",
                  exporting: "Exporting clips", training: "Training", done: "Done", error: "Failed" };
 const shown = new Set();
 
@@ -346,9 +391,11 @@ $("form").addEventListener("submit", async (event) => {
   $("outdir").textContent = "";
   $("clips").replaceChildren(); shown.clear();
   try {
-    const path = typed || await upload(uploadFile);
+    const path = typed || await existingUpload(uploadFile) || await upload(uploadFile);
     const body = { path, preset: $("preset").value, vertical, copy: $("copy").checked,
-                   vision: $("vision").checked };
+                   vision: $("vision").checked, text: $("text").checked,
+                   player_name: $("player_name").value.trim() };
+    savePrefs();
     for (const key of ["top", "threshold", "pad_before", "pad_after", "min_len", "max_len", "audio_track"]) {
       if ($(key).value !== "") body[key] = $(key).value;
     }
@@ -380,7 +427,7 @@ function describeModel() {
     return;
   }
   $("model-line").textContent = m
-    ? `Trained on ${m.n_samples} clips from ${m.n_videos} video(s); held-out AUC ${Number(m.cv_auc).toFixed(2)} vs audio ${Number(m.baseline_auc).toFixed(2)}. ${ratedText}`
+    ? `Trained on ${m.n_samples} clips from ${m.n_videos} video(s); held-out AUC ${Number(m.cv_auc).toFixed(2)} vs audio ${Number(m.baseline_auc).toFixed(2)}. Influence on ranking: ${Math.round((m.trust || 0) * 100)}% (grows as it proves itself on more recordings). ${ratedText}`
     : `No ${preset} model yet. ${ratedText}`;
 }
 
@@ -390,6 +437,7 @@ async function loadLibrary() {
     $("vision").checked = false; $("vision").disabled = true;
     $("vision-hint").textContent = "Install the vision extra to enable: pip install -e \".[vision]\"";
   }
+  updateTextOption();
   const box = $("library");
   const openFolders = new Set([...box.querySelectorAll("details[open]")].map((d) => d.dataset.folder));
   if (!library.runs.length) {
@@ -456,6 +504,8 @@ $("path").addEventListener("input", () => {
 });
 $("preset").addEventListener("change", () => {
   showPresetDescription();
+  updateTextOption();
+  savePrefs();
   $("train-preset").value = $("preset").value;
   describeModel();
 });

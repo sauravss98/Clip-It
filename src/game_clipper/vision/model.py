@@ -107,6 +107,20 @@ class HighlightModel:
     std: np.ndarray
     meta: dict = field(default_factory=dict)
 
+    @property
+    def trust(self) -> float:
+        """0..1: how much this model has earned the right to change rankings.
+
+        Full trust needs a held-out ROC-AUC at least 0.10 above the audio-only
+        baseline, measured on two or more recordings. A model that doesn't beat
+        the baseline gets none; one evaluated on a single video gets at most half.
+        """
+        gain = float(self.meta.get("cv_auc", 0.5)) - float(self.meta.get("baseline_auc", 0.5))
+        if not np.isfinite(gain):
+            return 0.0
+        trust = float(np.clip(gain / 0.10, 0.0, 1.0))
+        return trust if int(self.meta.get("n_videos", 1)) >= 2 else trust / 2
+
     def predict(self, features: np.ndarray) -> np.ndarray:
         """Probability of "good highlight" for each row of ``features``."""
         x = np.atleast_2d(features)

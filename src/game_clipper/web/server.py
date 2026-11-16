@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from game_clipper import config, export, ffmpeg, pipeline, report, training, vision
 from game_clipper.events import format_clock
@@ -52,6 +52,7 @@ class JobRequest:
     copy: bool = False
     audio_track: int = 0
     vision: bool = True
+    text: bool = True  # read on-screen text when the preset supports it
     overrides: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -73,6 +74,9 @@ class JobRequest:
                     raise ValueError(f"'{key}' must be a number") from None
         if "top" in overrides:
             overrides["top"] = int(overrides["top"])
+        player = str(data.get("player_name") or "").strip()
+        if player:
+            overrides["player_name"] = player[:40]
         request = cls(
             path=path.resolve(),
             preset=str(data.get("preset") or config.DEFAULT_PRESET),
@@ -80,6 +84,7 @@ class JobRequest:
             copy=bool(data.get("copy")),
             audio_track=int(data.get("audio_track") or 0),
             vision=bool(data.get("vision", True)),
+            text=bool(data.get("text", True)),
             overrides=overrides,
         )
         if request.vertical and request.copy:
@@ -256,6 +261,19 @@ def run_job(job: Job, manager: JobManager) -> None:
     info = pipeline.probe_input(req.path, req.audio_track)
     duration = max(info.duration, 1.0)
     reranker = manager.reranker(req.preset) if req.vision and info.has_video else None
+    text_detector = None
+    if req.text and settings.text_scan and settings.text_events and info.has_video:
+        from game_clipper.detectors import text as text_mod
+
+        if text_mod.available():
+            text_detector = text_mod.TextDetector()
+
+    def on_text(seconds: float) -> None:
+        job.update(
+            status="reading",
+            message="Reading kill feed and banners",
+            progress=min(seconds / duration, 1.0),
+        )
 
     def on_vision(done: int, total: int) -> None:
         note = " with your model" if reranker is not None and reranker.model else ""
@@ -274,6 +292,8 @@ def run_job(job: Job, manager: JobManager) -> None:
         on_progress=lambda s: job.update(progress=min(s / duration, 1.0)),
         reranker=reranker,
         on_vision_progress=on_vision,
+        text_detector=text_detector,
+        on_text_progress=on_text,
     )
     events = analysis.selection.kept
     if not events:
@@ -423,8 +443,23 @@ class Handler(BaseHTTPRequestHandler):
             for name in config.available_presets():
                 path = hm.model_path(name)
                 if path.is_file():
-                    models[name] = hm.HighlightModel.load(path).meta
-        return {"runs": runs, "presets": presets, "models": models, "vision": vision.available()}
+                    loaded = hm.HighlightModel.load(path)
+                    models[name] = {**loaded.meta, "trust": loaded.trust}
+        from game_clipper.detectors import text as text_mod
+
+        text_presets = [
+            name
+            for name in config.available_presets()
+            if config.load_settings(name).text_scan and config.load_settings(name).text_events
+        ]
+        return {
+            "runs": runs,
+            "presets": presets,
+            "models": models,
+            "vision": vision.available(),
+            "ocr": text_mod.available(),
+            "text_presets": text_presets,
+        }
 
     def _job(self, job_id: str) -> Job | None:
         job = self.server.manager.jobs.get(job_id)
@@ -449,6 +484,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"presets": presets, "default": config.DEFAULT_PRESET})
         elif path == "/api/library":
             self._send_json(self._library())
+        elif path == "/api/upload/existing":
+            query = parse_qs(urlparse(self.path).query)
+            name = safe_filename(query.get("name", [""])[0])
+            size = int(query.get("size", ["-1"])[0] or -1)
+            candidate = self.server.upload_dir / name
+            same = candidate.is_file() and candidate.stat().st_size == size
+            self._send_json({"path": str(candidate.resolve()) if same else None})
         elif len(parts) == 3 and parts[:2] == ["api", "jobs"]:
             if job := self._job(parts[2]):
                 self._send_json(job.to_dict())
