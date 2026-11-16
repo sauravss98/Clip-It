@@ -31,6 +31,8 @@ class Settings:
     w_transient: float = 0.4
     transient_lookback: float = 3.0
     threshold: float = 0.6
+    max_flagged: float = 0.08
+    sustain_window: float = 2.0
     music_floor_db: float = 6.0
     music_min_len: float = 20.0
     music_max_std_db: float = 4.0
@@ -50,6 +52,8 @@ class Settings:
             raise ConfigError(f"min_len ({self.min_len}) is longer than max_len ({self.max_len})")
         if self.top < 1:
             raise ConfigError("top must be at least 1")
+        if self.max_flagged <= 0:
+            raise ConfigError("max_flagged must be positive (1 disables the cap)")
         for name in ("music_penalty", "tonal_penalty"):
             if not 0.0 <= getattr(self, name) <= 1.0:
                 raise ConfigError(f"{name} must be between 0 and 1")

@@ -24,8 +24,10 @@ class Event:
     mean: float = 0.0  # mean window score over the flagged core
     transient: float = 0.0  # strongest sudden jump
     active: float = 0.0  # seconds of flagged audio
+    loud_db: float = 0.0  # strongest sustained loudness above the baseline (dB)
+    music: float = 1.0  # strongest music penalty applied (1 = none)
     score: float = 0.0  # 0-100 ranking score
-    reasons: tuple[str, ...] = field(default_factory=tuple)
+    reasons: tuple[str, ...] = field(default_factory=tuple)  # detector-specific notes
     source: str = "loudness"
 
     @property

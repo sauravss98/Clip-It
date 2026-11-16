@@ -5,14 +5,24 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from conftest import MUSIC_BURSTS, MUSIC_SPAN, R6_BURSTS, requires_ffmpeg
+from conftest import (
+    MUSIC_BURSTS,
+    MUSIC_SPAN,
+    R6_BURSTS,
+    add_burst,
+    add_music,
+    quiet_bed,
+    requires_ffmpeg,
+)
 from game_clipper.audio import Features, features_from_chunks
 from game_clipper.config import load_settings
 from game_clipper.detectors.base import Detector
 from game_clipper.detectors.loudness import (
     LoudnessDetector,
     analyze,
+    candidates_from_timeline,
     onset_strength,
+    relative_tonality,
     rolling_percentile,
 )
 
@@ -130,3 +140,43 @@ def test_top_n_limits_results(mixed_audio: Path) -> None:
     assert len(events) == 2
     assert detector.selection is not None and len(detector.selection.dropped) >= 2
     assert min(e.score for e in events) >= max(e.score for e, _ in detector.selection.dropped)
+
+
+# --- regressions found on real recordings ---------------------------------
+
+
+def _features_from(signal: np.ndarray) -> Features:
+    return features_from_chunks([signal.astype(np.float32)], sample_rate=16000, window=0.5)
+
+
+def test_silent_start_is_not_an_event() -> None:
+    """OBS recordings often start with digital silence; audio fading in is not action."""
+    rng = np.random.default_rng(11)
+    signal = np.r_[np.zeros(30 * 16000), quiet_bed(90, rng)]
+    add_burst(signal, 80, rng)
+    settings = load_settings("generic")
+    tl = analyze(_features_from(signal), settings)
+    events = candidates_from_timeline(tl)
+    assert [round(e.peak_time) for e in events] == [80]
+
+
+def test_busy_audio_is_capped_by_max_flagged() -> None:
+    """In constantly loud games only the most intense moments are flagged."""
+    rng = np.random.default_rng(12)
+    signal = quiet_bed(300, rng)
+    for at in rng.uniform(0, 298, 250):  # gunfire all the time
+        add_burst(signal, float(at), rng, length=0.3, amp=float(rng.uniform(0.05, 0.5)))
+    tl = analyze(_features_from(signal), load_settings("fortnite"))
+    assert tl.flagged.mean() <= 0.085
+    assert tl.threshold > load_settings("fortnite").threshold
+
+
+def test_relative_tonality_flags_music_not_noise() -> None:
+    rng = np.random.default_rng(13)
+    signal = quiet_bed(120, rng) + 0.05 * rng.standard_normal(120 * 16000)
+    add_music(signal, 40, 80, amp=0.3)
+    ft = _features_from(signal)
+    tonal = relative_tonality(ft.flatness, ft.rms_db > -70, 20)
+    times = ft.times
+    assert tonal[(times > 45) & (times < 75)].min() > 0.9
+    assert tonal[(times < 30) | (times > 90)].max() < 0.1

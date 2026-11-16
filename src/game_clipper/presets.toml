@@ -23,14 +23,16 @@ baseline_percentile = 40.0
 w_sustained = 0.6
 w_transient = 0.4
 transient_lookback = 3.0     # seconds compared against for sudden jumps
-threshold = 0.6              # window score needed to start an event
+threshold = 0.6              # minimum window score needed to start an event
+max_flagged = 0.08           # adaptive cap: flag at most this fraction of the recording
+sustain_window = 2.0         # seconds of loudness averaged for the sustained score
 
 # Music / radio suppression
 music_floor_db = 6.0         # dB above the quiet floor that counts as "loud"
 music_min_len = 20.0         # loud stretches longer than this may be music
 music_max_std_db = 4.0       # ...if their loudness varies less than this
 music_penalty = 0.3          # 0 = off, 1 = fully suppress steady music
-tonal_penalty = 0.0          # extra penalty for tonal (low spectral flatness) audio
+tonal_penalty = 0.0          # penalty for stretches far more tonal than the rest of the video
 
 # Events
 merge_gap = 4.0              # merge flagged regions closer than this (s)

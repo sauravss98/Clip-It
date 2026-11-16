@@ -25,6 +25,7 @@ from game_clipper.detectors.base import Event
 
 DB_PER_UNIT = 10.0  # score units: 1.0 == 10 dB
 MAX_UNITS = 3.0
+SILENCE_GATE_DB = -70.0  # quieter windows are digital silence (OBS start, pauses, loading)
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class Timeline:
 
     window: float
     rms_db: np.ndarray
+    smooth_db: np.ndarray  # loudness averaged over a few seconds
     baseline_db: np.ndarray
     sustained: np.ndarray
     transient: np.ndarray
@@ -66,21 +68,51 @@ def rolling_percentile(values: np.ndarray, size: int, percentile: float) -> np.n
     k = max(1, size // step)
     half = k // 2
     padded = np.pad(coarse, (half, k - 1 - half), mode="edge")
-    coarse_pct = np.percentile(sliding_window_view(padded, k), percentile, axis=1)
+    view = sliding_window_view(padded, k)
+    if np.isnan(coarse).any():
+        # NaN marks values to ignore (silence). Windows that are all NaN borrow the
+        # nearest valid baseline.
+        valid = ~np.isnan(view).all(axis=1)
+        coarse_pct = np.full(len(coarse), np.nan)
+        if valid.any():
+            coarse_pct[valid] = np.nanpercentile(view[valid], percentile, axis=1)
+            idx = np.arange(len(coarse))
+            coarse_pct = np.interp(idx, idx[valid], coarse_pct[valid])
+    else:
+        coarse_pct = np.percentile(view, percentile, axis=1)
     if step == 1:
         return coarse_pct
     return np.interp(np.arange(n), np.arange(len(coarse)) * step, coarse_pct)
 
 
-def onset_strength(rms_db: np.ndarray, lookback: int) -> np.ndarray:
-    """dB jump of each window over the energy average of the previous ``lookback`` windows."""
+def smooth_db(rms_db: np.ndarray, size: int) -> np.ndarray:
+    """Centred moving average of loudness in the energy domain (returns dB)."""
+    if len(rms_db) == 0 or size <= 1:
+        return rms_db.copy()
+    size = min(size, len(rms_db))
+    power = 10.0 ** (rms_db / 10.0)
+    half = size // 2
+    padded = np.pad(power, (half, size - 1 - half), mode="edge")
+    return 10.0 * np.log10(sliding_window_view(padded, size).mean(axis=1) + 1e-12)
+
+
+def onset_strength(
+    rms_db: np.ndarray, lookback: int, floor_db: np.ndarray | None = None
+) -> np.ndarray:
+    """dB jump of each window over the energy average of the previous ``lookback`` windows.
+
+    With ``floor_db`` (usually the baseline) the reference never drops below the
+    recording's normal level, so sound returning after silence is not a "jump".
+    """
     if len(rms_db) == 0:
         return rms_db.copy()
     lookback = max(1, lookback)
     power = 10.0 ** (rms_db / 10.0)
     padded = np.concatenate([np.full(lookback, power[0]), power])
-    prev_mean = sliding_window_view(padded[:-1], lookback).mean(axis=1)
-    return np.maximum(rms_db - 10.0 * np.log10(prev_mean + 1e-12), 0.0)
+    prev_db = 10.0 * np.log10(sliding_window_view(padded[:-1], lookback).mean(axis=1) + 1e-12)
+    if floor_db is not None:
+        prev_db = np.maximum(prev_db, floor_db)
+    return np.maximum(rms_db - prev_db, 0.0)
 
 
 def music_factor(
@@ -94,14 +126,21 @@ def music_factor(
     max_std_db: float,
     penalty: float,
     tonal_penalty: float,
+    tonal_seconds: float = 10.0,
     spike_db: float = 6.0,
 ) -> np.ndarray:
     """Multiplicative factor in ``(0, 1]`` that suppresses music-like audio.
 
-    A long loud stretch with steady loudness looks like music or radio; its windows
-    are penalised unless they spike well above the stretch's typical level (a
-    gunshot over the radio). Tonal windows (low spectral flatness) can be penalised
-    further via ``tonal_penalty``.
+    Two independent cues:
+
+    * **Steadiness**: a long loud stretch with steady loudness looks like radio; its
+      windows are penalised unless they spike well above the stretch's typical
+      level (a gunshot over the radio).
+    * **Tonality**: music is tonal (low spectral flatness), gunfire and explosions
+      are noise-like. A ~10 s stretch that is much more tonal than the recording's
+      own typical audio (lobby music, victory screens, cutscenes) is penalised by
+      up to ``tonal_penalty``. Comparing against the recording itself keeps this
+      independent of each game's mix.
     """
     factor = np.ones(len(rms_db))
     if penalty > 0:
@@ -121,30 +160,55 @@ def music_factor(
             spike = np.clip((segment - median) / spike_db, 0.0, 1.0)
             factor[start:stop] *= 1.0 - penalty * steadiness * (1.0 - spike)
     if tonal_penalty > 0:
-        tonality = np.clip(1.0 - flatness / 0.3, 0.0, 1.0)  # flatness >= 0.3 ~ noisy
-        factor *= 1.0 - tonal_penalty * tonality
+        factor *= 1.0 - tonal_penalty * relative_tonality(
+            flatness, rms_db > SILENCE_GATE_DB, round(tonal_seconds / window)
+        )
     return factor
+
+
+TONAL_RATIO_START = 0.35  # no penalty while local flatness >= 35% of the recording's median
+TONAL_RATIO_FULL = 0.12  # full penalty at <= 12%
+
+
+def relative_tonality(flatness: np.ndarray, audible: np.ndarray, size: int) -> np.ndarray:
+    """0..1 per window: how much more tonal the surrounding seconds are than usual."""
+    if not audible.any():
+        return np.zeros(len(flatness))
+    log_flat = np.log10(np.maximum(flatness, 1e-6))
+    reference = float(np.median(log_flat[audible]))
+    local = rolling_percentile(np.where(audible, log_flat, np.nan), size, 50.0)
+    start, full = np.log10(TONAL_RATIO_START), np.log10(TONAL_RATIO_FULL)
+    return np.clip((start - (local - reference)) / (start - full), 0.0, 1.0)
 
 
 def analyze(features: audio.Features, settings: Settings) -> Timeline:
     """Score every window of a feature timeline. Pure function of its inputs."""
     w = features.window
     rms_db = features.rms_db
-    baseline = rolling_percentile(
-        rms_db, round(settings.baseline_seconds / w), settings.baseline_percentile
-    )
-    sustained = np.clip((rms_db - baseline) / DB_PER_UNIT, 0.0, MAX_UNITS)
+    audible = rms_db > SILENCE_GATE_DB
+    smoothed = smooth_db(rms_db, round(settings.sustain_window / w))
+    if audible.any():
+        baseline = rolling_percentile(
+            np.where(audible, smoothed, np.nan),
+            round(settings.baseline_seconds / w),
+            settings.baseline_percentile,
+        )
+    else:
+        baseline = np.full(len(rms_db), SILENCE_GATE_DB)
+    sustained = np.clip((smoothed - baseline) / DB_PER_UNIT, 0.0, MAX_UNITS)
 
-    onset = onset_strength(rms_db, round(settings.transient_lookback / w))
+    onset = onset_strength(rms_db, round(settings.transient_lookback / w), floor_db=baseline)
     transient = np.clip(onset / DB_PER_UNIT, 0.0, MAX_UNITS)
     # A hit lasts a moment: hold the transient for ~1 s so it overlaps the loud part.
     hold = max(1, round(1.0 / w))
     if len(transient) > hold:
         transient = sliding_window_view(np.pad(transient, (hold - 1, 0)), hold).max(axis=1)
 
-    floor = rolling_percentile(rms_db, round(3 * settings.baseline_seconds / w), 10.0)
+    # Music stretches are found on the smoothed loudness that drives the sustained
+    # score, so the penalty covers the same windows the smoothing spreads into.
+    floor = rolling_percentile(smoothed, round(3 * settings.baseline_seconds / w), 10.0)
     factor = music_factor(
-        rms_db,
+        smoothed,
         features.flatness,
         window=w,
         floor_db=floor,
@@ -155,30 +219,33 @@ def analyze(features: audio.Features, settings: Settings) -> Timeline:
         tonal_penalty=settings.tonal_penalty,
     )
     score = (settings.w_sustained * sustained + settings.w_transient * transient) * factor
+    score = np.where(audible, score, 0.0)
     return Timeline(
         window=w,
         rms_db=rms_db,
+        smooth_db=smoothed,
         baseline_db=baseline,
         sustained=sustained,
         transient=transient,
         music_factor=factor,
         score=score,
-        threshold=settings.threshold,
+        threshold=adaptive_threshold(score, audible, settings.threshold, settings.max_flagged),
     )
 
 
-def _reasons(tl: Timeline, sl: slice) -> tuple[str, ...]:
-    reasons = []
-    above = float(np.max(tl.rms_db[sl] - tl.baseline_db[sl]))
-    if above >= 3.0:
-        reasons.append(f"loud: +{above:.1f} dB over baseline")
-    jump = float(np.max(tl.transient[sl])) * DB_PER_UNIT
-    if jump >= 3.0:
-        reasons.append(f"sharp onset: +{jump:.1f} dB jump")
-    min_factor = float(np.min(tl.music_factor[sl]))
-    if min_factor < 0.95:
-        reasons.append(f"music-like audio penalised (x{min_factor:.2f})")
-    return tuple(reasons)
+def adaptive_threshold(
+    score: np.ndarray, audible: np.ndarray, threshold: float, max_flagged: float
+) -> float:
+    """Raise ``threshold`` so at most ``max_flagged`` of the audible windows pass.
+
+    Busy games (Fortnite, League) are loud most of the time, so a fixed threshold
+    would flag a third of the video. Capping the flagged fraction keeps only each
+    recording's most intense moments. ``max_flagged >= 1`` disables the cap.
+    """
+    values = score[audible]
+    if max_flagged >= 1.0 or len(values) == 0:
+        return threshold
+    return max(threshold, float(np.quantile(values, 1.0 - max_flagged)))
 
 
 def candidates_from_timeline(tl: Timeline) -> list[Event]:
@@ -197,7 +264,8 @@ def candidates_from_timeline(tl: Timeline) -> list[Event]:
                 mean=float(np.mean(tl.score[sl])),
                 transient=float(np.max(tl.transient[sl])),
                 active=(stop - start) * tl.window,
-                reasons=_reasons(tl, sl),
+                loud_db=float(np.max(tl.smooth_db[sl] - tl.baseline_db[sl])),
+                music=float(np.min(tl.music_factor[sl])),
             )
         )
     return out

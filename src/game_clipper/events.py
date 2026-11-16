@@ -46,6 +46,8 @@ def _combine(a: Event, b: Event) -> Event:
         mean=mean,
         transient=max(a.transient, b.transient),
         active=total,
+        loud_db=max(a.loud_db, b.loud_db),
+        music=min(a.music, b.music),
         reasons=reasons,
     )
 
@@ -95,6 +97,20 @@ def clamp_length(event: Event, min_len: float, max_len: float, duration: float) 
     return replace(event, start=start, end=min(duration, start + target))
 
 
+def explain(event: Event) -> tuple[str, ...]:
+    """Human-readable reasons built from an event's (merged) metrics plus its notes."""
+    out = []
+    if event.loud_db >= 3.0:
+        out.append(f"loud: +{event.loud_db:.1f} dB over baseline")
+    if event.transient * 10.0 >= 3.0:
+        out.append(f"sharp onset: +{event.transient * 10.0:.1f} dB jump")
+    if event.active >= 6.0:
+        out.append(f"{event.active:.0f}s of sustained action")
+    if event.music < 0.95:
+        out.append(f"music-like audio penalised (x{event.music:.2f})")
+    return tuple(dict.fromkeys(out + list(event.reasons)))
+
+
 def score_event(event: Event) -> float:
     """Ranking score from 0 to 100.
 
@@ -128,7 +144,7 @@ def select_events(
     # Padding can make neighbours overlap; overlapping clips would duplicate footage.
     events = merge_events(events, 0.0)
     events = [clamp_length(e, min_len, max_len, duration) for e in events]
-    events = [replace(e, score=score_event(e)) for e in events]
+    events = [replace(e, score=score_event(e), reasons=explain(e)) for e in events]
 
     ranked = sorted(events, key=lambda e: e.score, reverse=True)
     kept = sorted(ranked[:top], key=lambda e: e.start)
