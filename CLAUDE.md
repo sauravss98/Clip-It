@@ -67,18 +67,24 @@ in v1: presets only change parameters and weights.
 game-clipper detect VIDEO [options]   # detect events, print a table, write events.json
 game-clipper clip   VIDEO [options]   # detect + export clips
 game-clipper tune   VIDEO [options]   # timeline summary (+ optional PNG plot) for tuning
+game-clipper ui     [--port --out]    # local drag-and-drop web UI (stdlib http.server)
 ```
  
 Common options:
 `--out DIR`, `--preset {generic,fortnite,league,r6siege,gta5_online,gta6}`,
 `--config FILE`, `--top N`, `--threshold`, `--pad-before`, `--pad-after`,
-`--min-len`, `--max-len`, `--vertical`, `--reencode` / `--copy`, `--dry-run`, `--verbose`.
+`--min-len`, `--max-len`, `--vertical`, `--reencode` / `--copy`, `--audio-track N`,
+`--dry-run`, `--verbose`.
  
 - Presets live in a config file (TOML) shipped with the package. Users can override them
   with `--config`. CLI flags override both.
 - `tune` prints loudness, transient and score over time, explains why moments were or
   weren't picked, and optionally saves a PNG plot (matplotlib as an **optional extra**:
   `pip install game-clipper[plot]`).
+- `ui` (added at the owner's request): local web page on 127.0.0.1 to upload a video or
+  paste a local path, pick preset/format, and preview/download clips. No extra
+  dependencies; jobs run one at a time on a worker thread. The CLI and the UI share
+  `pipeline.py` (probe -> analyse -> export -> reports); keep logic there, not in either UI.
 ## Export
  
 - **Default `--reencode`**: frame-accurate cuts with `h264_nvenc`. Fall back to
@@ -94,7 +100,7 @@ Common options:
   - `events.json`: every event with times, scores, and reasons.
   - `index.html`: a simple self-contained review page listing each clip with a
     `<video>` preview, timestamp and score, so the owner can review in a browser.
-## Project layout (suggested)
+## Project layout
  
 ```
 game-clipper/
@@ -105,7 +111,8 @@ game-clipper/
 ├─ .gitignore               # exclude videos, output/, *.mp4, *.mkv, .venv
 ├─ src/game_clipper/
 │  ├─ __init__.py
-│  ├─ cli.py                # typer app: detect / clip / tune
+│  ├─ cli.py                # typer app: detect / clip / tune / ui
+│  ├─ pipeline.py           # analyse -> export -> reports, shared by CLI and UI
 │  ├─ config.py             # preset + config loading and merging
 │  ├─ presets.toml
 │  ├─ ffmpeg.py             # ffmpeg/ffprobe checks, probing, streaming helpers
@@ -115,12 +122,16 @@ game-clipper/
 │  │  └─ loudness.py
 │  ├─ events.py             # merge, pad, clamp, score, rank (pure functions)
 │  ├─ export.py             # cutting, NVENC fallback, vertical filter
-│  └─ report.py             # events.json + index.html
+│  ├─ report.py             # events.json + index.html
+│  └─ web/                  # server.py (stdlib HTTP + job queue), static/index.html
 └─ tests/
    ├─ conftest.py           # synthetic video/audio generation with ffmpeg
    ├─ test_events.py
    ├─ test_detector.py
-   └─ test_export.py
+   ├─ test_export.py
+   ├─ test_config.py
+   ├─ test_cli.py
+   └─ test_web.py
 ```
  
 ## Engineering rules
@@ -172,7 +183,7 @@ cleanly in CI (no GPU there).
   OBS WebSocket.
 - Kill-feed OCR / vision detectors (Fortnite "Eliminated", R6 kill feed).
 - Auto-captions / text hooks burned into vertical clips.
-- Simple GUI or drag-and-drop wrapper.
+- Packaged desktop app (the local web UI exists; see `ui`).
 ## Workflow for Claude
  
 1. Before building, briefly propose the structure and detection algorithm, then proceed.
