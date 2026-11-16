@@ -13,6 +13,7 @@ htmlcov/
 
 # Media and output (never commit recordings or clips)
 output/
+videos/
 clips/
 *.mp4
 *.mkv

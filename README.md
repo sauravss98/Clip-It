@@ -1,6 +1,6 @@
 # game-clipper
 
-[![CI](https://github.com/OWNER/game-clipper/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/game-clipper/actions/workflows/ci.yml)
+[![CI](https://github.com/sauravss98/Clip-It/actions/workflows/ci.yml/badge.svg)](https://github.com/sauravss98/Clip-It/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
@@ -47,8 +47,8 @@ Check with `ffmpeg -version`.
 ### 2. game-clipper (Python 3.11+)
 
 ```powershell
-git clone https://github.com/OWNER/game-clipper.git
-cd game-clipper
+git clone https://github.com/sauravss98/Clip-It.git
+cd Clip-It
 python -m venv .venv
 .venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
 pip install -e .                # add [plot] for PNG plots in `tune`
