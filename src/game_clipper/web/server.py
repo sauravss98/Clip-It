@@ -35,6 +35,21 @@ RANGE_CAP = 1024 * 1024  # max bytes per Range response (see Handler._send_file)
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._ -]+")
 
 
+def find_same_recording(folder: Path, video: Path) -> Path | None:
+    """An existing file in ``folder`` with the same content as ``video``, if any."""
+    size = video.stat().st_size
+    fingerprint: str | None = None
+    for other in folder.iterdir():
+        if other == video or other.name.startswith(".") or not other.is_file():
+            continue
+        if other.stat().st_size != size:
+            continue  # cheap check first; hashing only runs for same-size files
+        fingerprint = fingerprint or training.recording_id(str(video))
+        if training.recording_id(str(other)) == fingerprint:
+            return other
+    return None
+
+
 def safe_filename(name: str) -> str:
     """Reduce an uploaded file name to a safe basename."""
     base = Path(name.replace("\\", "/")).name
@@ -548,23 +563,32 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0:
             raise ValueError("Empty upload")
         name = safe_filename(unquote(self.headers.get("X-Filename") or "upload.mp4"))
-        self.server.upload_dir.mkdir(parents=True, exist_ok=True)
-        target = self.server.upload_dir / name
-        n = 1
-        while target.exists():
-            target = self.server.upload_dir / f"{Path(name).stem} ({n}){Path(name).suffix}"
-            n += 1
+        upload_dir = self.server.upload_dir
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        partial = upload_dir / f".{uuid.uuid4().hex}.part"
         remaining = length
         try:
-            with target.open("wb") as fh:
+            with partial.open("wb") as fh:
                 while remaining:
                     chunk = self.rfile.read(min(COPY_CHUNK, remaining))
                     if not chunk:
                         raise ValueError("Upload interrupted")
                     fh.write(chunk)
                     remaining -= len(chunk)
+            if same := find_same_recording(upload_dir, partial):
+                # Same video saved under another name (e.g. a second browser download):
+                # reuse it, so we don't keep GBs of copies and training sees one recording.
+                partial.unlink()
+                self._send_json({"path": str(same.resolve())}, HTTPStatus.OK)
+                return
+            target = upload_dir / name
+            n = 1
+            while target.exists():
+                target = upload_dir / f"{Path(name).stem} ({n}){Path(name).suffix}"
+                n += 1
+            partial.replace(target)
         except BaseException:
-            target.unlink(missing_ok=True)
+            partial.unlink(missing_ok=True)
             raise
         self._send_json({"path": str(target.resolve())}, HTTPStatus.CREATED)
 

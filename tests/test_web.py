@@ -179,6 +179,22 @@ def test_clips_play_while_job_is_still_exporting(server: ClipperServer) -> None:
     assert request(server, "GET", "/files/..%2F/outside.mp4")[0] == 404
 
 
+def test_reupload_under_another_name_reuses_the_file(server: ClipperServer) -> None:
+    payload = b"the same recording" * 100
+    status, _, body = request(server, "POST", "/api/upload", payload, {"X-Filename": "game.mp4"})
+    first = Path(json.loads(body)["path"])
+    assert status == 201
+    status, _, body = request(
+        server, "POST", "/api/upload", payload, {"X-Filename": "game%20(2).mp4"}
+    )
+    assert status == 200 and Path(json.loads(body)["path"]) == first
+    status, _, body = request(
+        server, "POST", "/api/upload", payload[::-1], {"X-Filename": "game.mp4"}
+    )
+    assert status == 201 and Path(json.loads(body)["path"]).name == "game (1).mp4"
+    assert sorted(p.name for p in server.upload_dir.iterdir()) == ["game (1).mp4", "game.mp4"]
+
+
 def test_existing_upload_is_reused(server: ClipperServer) -> None:
     server.upload_dir.mkdir(parents=True, exist_ok=True)
     (server.upload_dir / "match.mp4").write_bytes(b"x" * 10)
