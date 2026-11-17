@@ -67,7 +67,7 @@ in v1: presets only change parameters and weights.
 game-clipper detect VIDEO [options]   # detect events, print a table, write events.json
 game-clipper clip   VIDEO [options]   # detect + export clips
 game-clipper tune   VIDEO [options]   # timeline summary (+ optional PNG plot) for tuning
-game-clipper train  [--preset --out]  # train the user's model from 👍/👎 ratings
+game-clipper train  [--preset --out --include-preset P]  # train from 👍/👎 ratings
 game-clipper ui     [--port --out]    # local drag-and-drop web UI (stdlib http.server)
 ```
  

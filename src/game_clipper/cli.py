@@ -676,6 +676,14 @@ def train(
     out: Annotated[
         Path, typer.Option("--out", "-o", help="Folder containing your clip runs.")
     ] = Path("output"),
+    include_preset: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--include-preset",
+            help="Also use ratings from runs made with this preset (repeatable), e.g. "
+            "`--preset league --include-preset generic` if you clipped League as generic.",
+        ),
+    ] = None,
 ) -> None:
     """Train your own highlight model from clips you rated 👍/👎 in the UI."""
     from game_clipper import training, vision
@@ -690,6 +698,7 @@ def train(
             preset,
             reranker_factory=VisionReranker,
             on_status=lambda msg: console.print(f"[dim]{msg}[/]"),
+            include_presets=include_preset or (),
         )
     except training.TrainingError as exc:
         _fail(str(exc))

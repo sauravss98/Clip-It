@@ -8,8 +8,9 @@ if the clips were exported without the vision stage.
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -86,13 +87,34 @@ def find_runs(out_root: Path) -> list[Run]:
     return sorted(runs, key=lambda r: r.folder.stat().st_mtime, reverse=True)
 
 
+def recording_id(video: str, chunk: int = 1 << 20) -> str:
+    """Identify a recording by its content, so copies of one file share an id.
+
+    The UI saves a re-upload of the same video under a new name ("clip (2).mp4"),
+    and evaluation must treat both as one recording or clips from it leak between
+    training and test folds. Hashing the size plus three 1 MiB samples is instant
+    even for multi-GB files. Falls back to the path if the file is gone.
+    """
+    path = Path(video)
+    try:
+        size = path.stat().st_size
+        digest = hashlib.sha1(str(size).encode())
+        with path.open("rb") as f:
+            for offset in (0, max(size // 2 - chunk // 2, 0), max(size - chunk, 0)):
+                f.seek(offset)
+                digest.update(f.read(chunk))
+    except OSError:
+        return str(path)
+    return digest.hexdigest()
+
+
 @dataclass
 class Dataset:
     """Model inputs for every rated clip."""
 
     x: np.ndarray
     y: np.ndarray
-    groups: list[str]  # source video per clip, for leave-one-video-out evaluation
+    groups: list[str]  # recording id per clip, for leave-one-video-out evaluation
     baseline: np.ndarray  # audio-only score, the ranking we must beat
 
 
@@ -134,10 +156,11 @@ def build_dataset(
                 for record, seen in zip(missing, reranker.look(source, events), strict=True):
                     cache[record.filename or ""] = seen.features(record.event)
                 np.savez(cache_path, **cache)
+        group = recording_id(run.video)
         for record in rated:
             rows.append(cache[record.filename or ""])
             labels.append(run.labels[record.filename or ""])
-            groups.append(run.video)
+            groups.append(group)
 
     if not rows:
         raise TrainingError("No rated clips found. Rate clips with 👍/👎 in `game-clipper ui`.")
@@ -151,11 +174,17 @@ def train(
     preset: str,
     reranker_factory: Callable[[], VisionReranker],
     on_status: Callable[[str], None] | None = None,
+    include_presets: Sequence[str] = (),
 ) -> tuple[HighlightModel, TrainReport, Path]:
-    """Train and save the model for ``preset`` from rated clips under ``out_root``."""
+    """Train and save the model for ``preset`` from rated clips under ``out_root``.
+
+    ``include_presets`` also pulls in ratings from runs made with other presets,
+    e.g. recordings of this game that were clipped with ``generic``.
+    """
     from game_clipper.vision import model as hm
 
-    runs = [r for r in find_runs(out_root) if r.preset == preset and r.labels]
+    wanted = {preset, *include_presets}
+    runs = [r for r in find_runs(out_root) if r.preset in wanted and r.labels]
     if not runs:
         raise TrainingError(
             f"No rated {preset} clips under {out_root}. Rate clips with 👍/👎 in "

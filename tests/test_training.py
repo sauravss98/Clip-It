@@ -71,7 +71,7 @@ def test_train_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     out = tmp_path / "output"
     for i in range(3):
         video = tmp_path / f"video{i}.mp4"
-        video.write_bytes(b"x")
+        video.write_bytes(f"video {i}".encode())
         make_run(out, f"run{i}", video, n=8)
     make_run(out, "league run", tmp_path / "video0.mp4", n=4, preset="league")
 
@@ -85,6 +85,36 @@ def test_train_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     assert (out / "run0" / "vision.npz").is_file()
     training.train(out, "fortnite", reranker_factory=lambda: fake)
     assert fake.looked == 24
+
+
+def test_recording_id_follows_content_not_name(tmp_path: Path) -> None:
+    a, copy, other = tmp_path / "a.mp4", tmp_path / "a (2).mp4", tmp_path / "b.mp4"
+    a.write_bytes(b"same recording")
+    copy.write_bytes(b"same recording")
+    other.write_bytes(b"another recording")
+    assert training.recording_id(str(a)) == training.recording_id(str(copy))
+    assert training.recording_id(str(a)) != training.recording_id(str(other))
+    assert training.recording_id(str(tmp_path / "gone.mp4")).endswith("gone.mp4")
+
+
+def test_reuploads_are_one_group_and_presets_can_be_pooled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GAME_CLIPPER_HOME", str(tmp_path / "home"))
+    out = tmp_path / "output"
+    for i, content in enumerate([b"game A", b"game A", b"game B"]):
+        video = tmp_path / f"upload{i}.mp4"
+        video.write_bytes(content)
+        make_run(out, f"run{i}", video, n=6, preset="league" if i < 2 else "generic")
+
+    league_only = [r for r in training.find_runs(out) if r.preset == "league"]
+    data = training.build_dataset(league_only, FakeReranker)
+    assert len(data.y) == 12 and len(set(data.groups)) == 1  # two uploads, one recording
+
+    _, rep, _ = training.train(
+        out, "league", reranker_factory=FakeReranker, include_presets=["generic"]
+    )
+    assert rep.n_samples == 18 and rep.n_groups == 2
 
 
 def test_train_needs_enough_labels(tmp_path: Path) -> None:

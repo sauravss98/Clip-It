@@ -117,6 +117,8 @@ game-clipper tune "gta session.mp4" --preset gta5_online --plot gta.png
 
 # Train your model from clips you rated in the UI
 game-clipper train --preset fortnite
+# ...also counting ratings from League recordings you clipped with the generic preset
+game-clipper train --preset league --include-preset generic
 ```
 
 Output goes to `./output/<video name>/` (change with `--out`):
