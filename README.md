@@ -86,11 +86,14 @@ Small (~15 MB models), CPU only. Adds roughly 2-3 minutes per 20 minutes of foot
 
 ### The easy way: web UI
 
+Every time you want to use it, open a terminal in the project folder and run:
+
 ```powershell
-game-clipper ui
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
+game-clipper ui                 # options: --port 9000, --out "D:\Clips"
 ```
 
-A browser tab opens. Drop in a recording (or paste its path, which skips the upload copy
+A browser tab opens at <http://127.0.0.1:8765> (press **Ctrl+C** in the terminal to stop). Drop in a recording (or paste its path, which skips the upload copy
 for big files), pick your game, choose **Landscape** or **Shorts 9:16**, and hit
 **Find clips**. Clips appear as they finish exporting.
 
